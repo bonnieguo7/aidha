@@ -31,9 +31,12 @@ export interface ConversationTurn {
   content: string;
 }
 
-// Shape returned by the parse-task Edge Function: either a follow-up question or the final result.
+// Shape returned by the parse-task Edge Function: a follow-up question (plain
+// text reply expected), a multiple-choice question (tap one of `options`
+// instead of typing - currently only used for priority), or the final result.
 export type ParseTaskResponse =
   | { type: "question"; question: string }
+  | { type: "choice"; question: string; field: "priority"; options: Priority[] }
   | { type: "result"; data: ParsedTask };
 
 // Partial update returned by the edit-task Edge Function (mirrors the update_task tool
@@ -80,5 +83,9 @@ export interface TaskRow {
   leaving_by: string | null;
   leaving_notification_id: string | null;
   leaving_by_error: boolean;
+  // Separate from leaving_notification_id: fires at the task/event's own
+  // datetime (e.g. "pick up dry cleaning" firing at 10am), regardless of
+  // whether there's a location to compute a "leaving by" reminder from.
+  datetime_notification_id: string | null;
   created_at: string;
 }

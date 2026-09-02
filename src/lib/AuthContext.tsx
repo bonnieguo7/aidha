@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import type { Session } from "@supabase/supabase-js";
+import { registerPushToStartListener } from "./liveActivity";
 import { supabase } from "./supabase";
 
 interface AuthContextValue {
@@ -28,6 +29,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     return () => subscription.subscription.unsubscribe();
   }, []);
+
+  // Registers this device for remote Live Activity push-to-start once signed
+  // in - a one-time device-capability concern, unrelated to
+  // refreshUpcomingDepartures.ts's per-task recompute scope, so it lives
+  // here rather than there. registerPushToStartListener is defensive about
+  // the native module not existing on a stale build, so this is safe even
+  // before a rebuild.
+  useEffect(() => {
+    if (!session) return;
+    return registerPushToStartListener();
+    // Keyed on the user id, not the whole session object - onAuthStateChange
+    // fires with a new session reference on routine token refresh, which
+    // would otherwise tear down and re-add this listener every time.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session?.user.id]);
 
   async function signIn(email: string, password: string) {
     const { error } = await supabase.auth.signInWithPassword({ email, password });

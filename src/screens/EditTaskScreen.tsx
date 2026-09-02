@@ -8,7 +8,6 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
-  Switch,
   Text,
   TextInput,
   View,
@@ -20,13 +19,14 @@ import { openInMaps } from "../lib/maps";
 import { cancelNotification } from "../lib/notifications";
 import { updateDepartureForTask } from "../lib/scheduleDeparture";
 import { supabase } from "../lib/supabase";
+import { syncDueNotification } from "../lib/syncDueNotification";
 import { colors } from "../lib/theme";
+import DatePickerField from "../components/DatePickerField";
+import TimePickerField from "../components/TimePickerField";
 import type { TasksStackParamList } from "../navigation/types";
 import type {
   ConversationTurn,
-  DateCertainty,
   EditTaskResponse,
-  PlaceType,
   Priority,
   RecurringFrequency,
   TaskPatch,
@@ -36,7 +36,6 @@ import type {
 
 type Props = NativeStackScreenProps<TasksStackParamList, "EditTask">;
 
-const NO_PLACE_TYPE = "none" as const;
 const NO_RECURRENCE = "none" as const;
 const NO_PRIORITY = "none" as const;
 
@@ -258,10 +257,6 @@ export default function EditTaskScreen({ route, navigation }: Props) {
   const [dateDraft, setDateDraft] = useState(dateParts.date);
   const [timeDraft, setTimeDraft] = useState(dateParts.time);
   const [typeDraft, setTypeDraft] = useState<TaskType>(taskData.type);
-  const [dateCertaintyDraft, setDateCertaintyDraft] = useState<DateCertainty>(taskData.date_certainty);
-  const [locationTypeDraft, setLocationTypeDraft] = useState<PlaceType | typeof NO_PLACE_TYPE>(
-    taskData.location_place_type ?? NO_PLACE_TYPE
-  );
   const [priorityDraft, setPriorityDraft] = useState<Priority | typeof NO_PRIORITY>(
     taskData.priority ?? NO_PRIORITY
   );
@@ -269,7 +264,6 @@ export default function EditTaskScreen({ route, navigation }: Props) {
     RecurringFrequency | typeof NO_RECURRENCE
   >(taskData.recurring_frequency ?? NO_RECURRENCE);
   const [recurrenceDetailDraft, setRecurrenceDetailDraft] = useState(taskData.recurring_detail ?? "");
-  const [requiresDowntimeDraft, setRequiresDowntimeDraft] = useState(taskData.requires_downtime);
 
   const [askMessages, setAskMessages] = useState<ConversationTurn[]>([]);
   const [askDraft, setAskDraft] = useState("");
@@ -283,6 +277,7 @@ export default function EditTaskScreen({ route, navigation }: Props) {
     setError(null);
     setIsDeleting(true);
     await cancelNotification(taskData.leaving_notification_id);
+    await cancelNotification(taskData.datetime_notification_id);
     const { error: deleteError } = await supabase.from("tasks").delete().eq("id", taskData.id);
     setIsDeleting(false);
 
@@ -334,6 +329,7 @@ export default function EditTaskScreen({ route, navigation }: Props) {
         break;
       case "date":
         setDateDraft(parts.date);
+        setTimeDraft(parts.time);
         break;
       case "time":
         setTimeDraft(parts.time);
@@ -341,21 +337,12 @@ export default function EditTaskScreen({ route, navigation }: Props) {
       case "type":
         setTypeDraft(taskData.type);
         break;
-      case "dateCertainty":
-        setDateCertaintyDraft(taskData.date_certainty);
-        break;
-      case "locationType":
-        setLocationTypeDraft(taskData.location_place_type ?? NO_PLACE_TYPE);
-        break;
       case "priority":
         setPriorityDraft(taskData.priority ?? NO_PRIORITY);
         break;
       case "recurrence":
         setRecurrenceFrequencyDraft(taskData.recurring_frequency ?? NO_RECURRENCE);
         setRecurrenceDetailDraft(taskData.recurring_detail ?? "");
-        break;
-      case "requiresDowntime":
-        setRequiresDowntimeDraft(taskData.requires_downtime);
         break;
     }
   }
@@ -384,8 +371,24 @@ export default function EditTaskScreen({ route, navigation }: Props) {
     if (key !== "title") {
       syncTitleIfNeeded(previous, updated);
     }
-    if (key === "location" || key === "date" || key === "time" || key === "dateCertainty") {
+    if (key === "location" || key === "date" || key === "time") {
       maybeUpdateDeparture(updated);
+    }
+    if (key === "date" || key === "time") {
+      maybeSyncDueNotification(updated);
+    }
+  }
+
+  // Reschedules (or clears) the "at the scheduled time" notification in the
+  // background after a manual date/time edit - independent of the location-
+  // based "leaving by" one above, so it doesn't need a location at all. No
+  // loading state or error surfaced here, same reasoning as syncTitleIfNeeded.
+  async function maybeSyncDueNotification(task: TaskRow) {
+    try {
+      const updated = await syncDueNotification(task);
+      setTaskData(updated);
+    } catch {
+      // Best-effort background recompute - ignore failures.
     }
   }
 
@@ -519,16 +522,23 @@ export default function EditTaskScreen({ route, navigation }: Props) {
     saveField("type", { type: typeDraft });
   }
 
-  function handleSaveDateCertainty() {
-    const patch: Record<string, unknown> = { date_certainty: dateCertaintyDraft };
-    if (dateCertaintyDraft === "none") patch.datetime = null;
-    saveField("dateCertainty", patch);
-  }
-
-  function handleSaveLocationType() {
-    saveField("locationType", {
-      location_place_type: locationTypeDraft === NO_PLACE_TYPE ? null : locationTypeDraft,
-    });
+  // For a task with no deadline at all (date_certainty "none") - gives it one
+  // via the structured editor instead of that only being possible through
+  // "Ask AI". Deliberately doesn't touch requires_downtime: a task that was
+  // flexible stays flexible (still surfaces in "When you have time") even
+  // once it also has a reminder time - same reasoning as the booking-ahead
+  // case, where a computed reminder date coexists with requires_downtime.
+  function handleAddReminder() {
+    if (!dateDraft.trim()) {
+      setError("Enter a date for the reminder.");
+      return;
+    }
+    try {
+      const nextDatetime = datePartsToIso(dateDraft, timeDraft || "09:00");
+      saveField("date", { datetime: nextDatetime, date_certainty: "exact" });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Invalid date or time.");
+    }
   }
 
   function handleSavePriority() {
@@ -541,10 +551,6 @@ export default function EditTaskScreen({ route, navigation }: Props) {
       recurring_detail:
         recurrenceFrequencyDraft === NO_RECURRENCE ? null : recurrenceDetailDraft.trim() || null,
     });
-  }
-
-  function handleSaveRequiresDowntime() {
-    saveField("requiresDowntime", { requires_downtime: requiresDowntimeDraft });
   }
 
   function buildAiTaskPayload(t: TaskRow) {
@@ -603,6 +609,9 @@ export default function EditTaskScreen({ route, navigation }: Props) {
 
     if (patch.location !== undefined || patch.datetime !== undefined) {
       maybeUpdateDeparture(updated);
+    }
+    if (patch.datetime !== undefined) {
+      maybeSyncDueNotification(updated);
     }
   }
 
@@ -698,28 +707,24 @@ export default function EditTaskScreen({ route, navigation }: Props) {
             <EditorActions onSave={handleSaveType} onCancel={() => closeField("type")} saving={savingField === "type"} />
           </FieldRow>
 
-          <FieldRow
-            icon="checkmark-circle-outline"
-            label="Date certainty"
-            value={capitalize(taskData.date_certainty)}
-            expanded={!!expanded.dateCertainty}
-            onToggle={() => toggleField("dateCertainty")}
-          >
-            <SegmentedControl
-              options={[
-                { label: "Exact", value: "exact" as DateCertainty },
-                { label: "Approximate", value: "approximate" as DateCertainty },
-                { label: "None", value: "none" as DateCertainty },
-              ]}
-              value={dateCertaintyDraft}
-              onChange={setDateCertaintyDraft}
-            />
-            <EditorActions
-              onSave={handleSaveDateCertainty}
-              onCancel={() => closeField("dateCertainty")}
-              saving={savingField === "dateCertainty"}
-            />
-          </FieldRow>
+          {!showDateTimeRows && (
+            <FieldRow
+              icon="alarm-outline"
+              label="Reminder"
+              value="Not set - tap to add"
+              valueColor={colors.accent}
+              expanded={!!expanded.date}
+              onToggle={() => toggleField("date")}
+            >
+              <DatePickerField value={dateDraft} onChange={setDateDraft} />
+              <TimePickerField value={timeDraft} onChange={setTimeDraft} />
+              <EditorActions
+                onSave={handleAddReminder}
+                onCancel={() => closeField("date")}
+                saving={savingField === "date"}
+              />
+            </FieldRow>
+          )}
 
           {showDateTimeRows && (
             <FieldRow
@@ -729,31 +734,12 @@ export default function EditTaskScreen({ route, navigation }: Props) {
               expanded={!!expanded.date}
               onToggle={() => toggleField("date")}
             >
-              <View style={styles.inlineEditorRow}>
-                <TextInput
-                  style={styles.inlineInput}
-                  value={dateDraft}
-                  onChangeText={setDateDraft}
-                  placeholder="2026-08-01"
-                  placeholderTextColor={colors.textMuted}
-                  autoCapitalize="none"
-                  autoFocus
-                />
-                <Pressable
-                  onPress={handleSaveDate}
-                  disabled={savingField === "date"}
-                  style={[styles.saveChip, savingField === "date" && styles.buttonDisabled]}
-                >
-                  {savingField === "date" ? (
-                    <ActivityIndicator color={colors.onSurfaceInverse} size="small" />
-                  ) : (
-                    <Text style={styles.saveChipText}>Save</Text>
-                  )}
-                </Pressable>
-                <Pressable onPress={() => closeField("date")} disabled={savingField === "date"} hitSlop={8}>
-                  <Text style={styles.cancelLink}>Cancel</Text>
-                </Pressable>
-              </View>
+              <DatePickerField value={dateDraft} onChange={setDateDraft} />
+              <EditorActions
+                onSave={handleSaveDate}
+                onCancel={() => closeField("date")}
+                saving={savingField === "date"}
+              />
             </FieldRow>
           )}
 
@@ -765,31 +751,12 @@ export default function EditTaskScreen({ route, navigation }: Props) {
               expanded={!!expanded.time}
               onToggle={() => toggleField("time")}
             >
-              <View style={styles.inlineEditorRow}>
-                <TextInput
-                  style={styles.inlineInput}
-                  value={timeDraft}
-                  onChangeText={setTimeDraft}
-                  placeholder="14:30"
-                  placeholderTextColor={colors.textMuted}
-                  autoCapitalize="none"
-                  autoFocus
-                />
-                <Pressable
-                  onPress={handleSaveTime}
-                  disabled={savingField === "time"}
-                  style={[styles.saveChip, savingField === "time" && styles.buttonDisabled]}
-                >
-                  {savingField === "time" ? (
-                    <ActivityIndicator color={colors.onSurfaceInverse} size="small" />
-                  ) : (
-                    <Text style={styles.saveChipText}>Save</Text>
-                  )}
-                </Pressable>
-                <Pressable onPress={() => closeField("time")} disabled={savingField === "time"} hitSlop={8}>
-                  <Text style={styles.cancelLink}>Cancel</Text>
-                </Pressable>
-              </View>
+              <TimePickerField value={timeDraft} onChange={setTimeDraft} />
+              <EditorActions
+                onSave={handleSaveTime}
+                onCancel={() => closeField("time")}
+                saving={savingField === "time"}
+              />
             </FieldRow>
           )}
 
@@ -834,32 +801,6 @@ export default function EditTaskScreen({ route, navigation }: Props) {
                 <Text style={styles.openInMapsText}>Open in Maps</Text>
               </Pressable>
             )}
-          </FieldRow>
-
-          <FieldRow
-            icon="pricetag-outline"
-            label="Location type"
-            value={
-              taskData.location_place_type ? capitalize(taskData.location_place_type.replace("_", " ")) : "None"
-            }
-            expanded={!!expanded.locationType}
-            onToggle={() => toggleField("locationType")}
-          >
-            <SegmentedControl
-              options={[
-                { label: "None", value: NO_PLACE_TYPE },
-                { label: "Address", value: "specific_address" as PlaceType },
-                { label: "Place", value: "known_place" as PlaceType },
-                { label: "Category", value: "category" as PlaceType },
-              ]}
-              value={locationTypeDraft}
-              onChange={setLocationTypeDraft}
-            />
-            <EditorActions
-              onSave={handleSaveLocationType}
-              onCancel={() => closeField("locationType")}
-              saving={savingField === "locationType"}
-            />
           </FieldRow>
 
           {/* Shows only when a "leaving by" reminder was never even attempted -
@@ -959,6 +900,7 @@ export default function EditTaskScreen({ route, navigation }: Props) {
             value={taskData.recurring_frequency ? capitalize(taskData.recurring_frequency) : "None"}
             expanded={!!expanded.recurrence}
             onToggle={() => toggleField("recurrence")}
+            bordered={false}
           >
             <SegmentedControl
               options={[
@@ -984,22 +926,6 @@ export default function EditTaskScreen({ route, navigation }: Props) {
               onSave={handleSaveRecurrence}
               onCancel={() => closeField("recurrence")}
               saving={savingField === "recurrence"}
-            />
-          </FieldRow>
-
-          <FieldRow
-            icon="hourglass-outline"
-            label="Requires downtime"
-            value={taskData.requires_downtime ? "Yes" : "No"}
-            expanded={!!expanded.requiresDowntime}
-            onToggle={() => toggleField("requiresDowntime")}
-            bordered={false}
-          >
-            <Switch value={requiresDowntimeDraft} onValueChange={setRequiresDowntimeDraft} />
-            <EditorActions
-              onSave={handleSaveRequiresDowntime}
-              onCancel={() => closeField("requiresDowntime")}
-              saving={savingField === "requiresDowntime"}
             />
           </FieldRow>
         </View>

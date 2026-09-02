@@ -47,3 +47,41 @@ export async function getTravelDuration(
     return null;
   }
 }
+
+// Rough bounding box around Manhattan - a rectangle, not the island's actual
+// shape, so it's approximate near the waterfront (could false-positive a
+// Jersey City address just across the Hudson, or false-negative a Roosevelt
+// Island address in the East River). Good enough for "which travel mode
+// makes sense from here," not meant to be precise at the edges.
+function isInManhattan(coords: Coords): boolean {
+  return (
+    coords.latitude >= 40.6997 &&
+    coords.latitude <= 40.8790 &&
+    coords.longitude >= -74.0194 &&
+    coords.longitude <= -73.9067
+  );
+}
+
+// Picks a travel mode instead of always using transit: always walk if it's
+// under 20 minutes, otherwise take the train from Manhattan (dense subway
+// coverage) or drive from anywhere else (transit is comparatively sparse
+// outside Manhattan, so driving is the more realistic default).
+export async function selectTravelRoute(
+  origin: Coords,
+  destination: Coords,
+  arrivalTime: Date
+): Promise<TravelResult | null> {
+  const walking = await getTravelDuration(origin, destination, arrivalTime, "walking");
+
+  if (walking && walking.durationMinutes < 20) {
+    return walking;
+  }
+
+  const preferredMode: TravelMode = isInManhattan(origin) ? "transit" : "driving";
+  const preferred = await getTravelDuration(origin, destination, arrivalTime, preferredMode);
+  if (preferred) return preferred;
+
+  // Preferred mode's request failed outright - fall back to the walking
+  // result (even a long one) rather than nothing.
+  return walking;
+}

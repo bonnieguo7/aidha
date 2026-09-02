@@ -11,11 +11,17 @@ const IS_DEV = process.env.APP_VARIANT === "development";
 // one, with no way to control which. Giving dev builds their own identifier
 // (and a distinguishable name) makes them a genuinely separate app on the
 // device instead of an ambiguous, visually-identical duplicate.
-export default ({ config }: ConfigContext): ExpoConfig => ({
-  ...config,
-  name: IS_DEV ? `${config.name} (Dev)` : (config.name as string),
-  ios: {
-    ...config.ios,
-    bundleIdentifier: IS_DEV ? `${config.ios?.bundleIdentifier}.dev` : config.ios?.bundleIdentifier,
-  },
-});
+export default ({ config }: ConfigContext): ExpoConfig => {
+  // app.json (the static base config) always supplies every field ExpoConfig
+  // requires - ConfigContext's own type just can't express that guarantee,
+  // since in principle a dynamic config could be the *only* config file.
+  const base = config as ExpoConfig;
+  return {
+    ...base,
+    name: IS_DEV ? `${base.name} (Dev)` : base.name,
+    ios: {
+      ...base.ios,
+      bundleIdentifier: IS_DEV ? `${base.ios?.bundleIdentifier}.dev` : base.ios?.bundleIdentifier,
+    },
+  };
+};

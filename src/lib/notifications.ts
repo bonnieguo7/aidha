@@ -35,6 +35,29 @@ export async function scheduleLeavingNotification(
   });
 }
 
+// Schedules a notification firing at the task/event's own datetime (e.g. "pick
+// up dry cleaning" going off at 10am) - independent of scheduleLeavingNotification
+// above, which is location-based and fires *before* the event to account for
+// travel time. This one fires *at* the time itself and needs no location at
+// all. Returns null (nothing scheduled) if there's no datetime, permission was
+// denied, or the time has already passed.
+export async function scheduleDueNotification(task: TaskRow): Promise<string | null> {
+  if (!task.datetime) return null;
+  const dueDate = new Date(task.datetime);
+  if (Number.isNaN(dueDate.getTime()) || dueDate.getTime() <= Date.now()) return null;
+
+  const granted = await ensureNotificationPermission();
+  if (!granted) return null;
+
+  return Notifications.scheduleNotificationAsync({
+    content: {
+      title: task.title,
+      body: task.location_raw_text ?? undefined,
+    },
+    trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: dueDate },
+  });
+}
+
 // Never leaves an orphaned notification behind - safe to call with an id that's
 // already fired or already cancelled.
 export async function cancelNotification(notificationId: string | null): Promise<void> {

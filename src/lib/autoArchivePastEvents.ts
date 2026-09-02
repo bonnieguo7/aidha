@@ -17,11 +17,13 @@ export async function archivePastEvents(rows: TaskRow[]): Promise<TaskRow[]> {
   );
   if (pastEvents.length === 0) return rows;
 
-  await Promise.all(pastEvents.map((t) => cancelNotification(t.leaving_notification_id)));
+  await Promise.all(
+    pastEvents.flatMap((t) => [cancelNotification(t.leaving_notification_id), cancelNotification(t.datetime_notification_id)])
+  );
 
   const { error } = await supabase
     .from("tasks")
-    .update({ is_completed: true, leaving_notification_id: null })
+    .update({ is_completed: true, leaving_notification_id: null, datetime_notification_id: null })
     .in(
       "id",
       pastEvents.map((t) => t.id)

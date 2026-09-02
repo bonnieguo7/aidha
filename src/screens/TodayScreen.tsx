@@ -16,6 +16,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useAuth } from "../lib/AuthContext";
 import { archivePastEvents } from "../lib/autoArchivePastEvents";
 import { cancelNotification } from "../lib/notifications";
+import { refreshUpcomingDepartures } from "../lib/refreshUpcomingDepartures";
 import { snoozeTask, type SnoozeOption } from "../lib/snoozeTask";
 import { supabase } from "../lib/supabase";
 import { colors } from "../lib/theme";
@@ -188,7 +189,8 @@ export default function TodayScreen({ navigation }: Props) {
       return;
     }
 
-    setAllTasks(await archivePastEvents((data ?? []) as TaskRow[]));
+    const active = await archivePastEvents((data ?? []) as TaskRow[]);
+    setAllTasks(await refreshUpcomingDepartures(active));
   }
 
   useFocusEffect(
@@ -208,9 +210,10 @@ export default function TodayScreen({ navigation }: Props) {
   async function handleComplete(item: TaskRow) {
     setBusyId(item.id);
     await cancelNotification(item.leaving_notification_id);
+    await cancelNotification(item.datetime_notification_id);
     const { error: updateError } = await supabase
       .from("tasks")
-      .update({ is_completed: true, leaving_notification_id: null })
+      .update({ is_completed: true, leaving_notification_id: null, datetime_notification_id: null })
       .eq("id", item.id);
     setBusyId(null);
 
@@ -276,7 +279,6 @@ export default function TodayScreen({ navigation }: Props) {
           </View>
           <View>
             <Text style={styles.appName}>Aidha</Text>
-            <Text style={styles.appTagline}>Always listening</Text>
           </View>
         </View>
         <View style={styles.topBarActions}>

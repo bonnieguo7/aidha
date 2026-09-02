@@ -86,6 +86,22 @@ const EXTRACT_TASK_TOOL = {
   },
 };
 
+const ASK_PRIORITY_TOOL = {
+  name: "ask_priority",
+  description:
+    "Ask the user to pick a priority level for a task with no deadline. Shows tappable Low/Normal/High buttons in the app instead of a free-text question - call this instead of asking about priority in plain text.",
+  input_schema: {
+    type: "object",
+    properties: {
+      question: {
+        type: "string",
+        description: "Short question shown above the choice buttons, e.g. 'How high priority is this?'",
+      },
+    },
+    required: ["question"],
+  },
+};
+
 function buildSystemPrompt(currentLocalDatetime: string, userTimezone: string): string {
   return `You are a task/event extraction assistant for a personal reminder app. You are
 having a short back-and-forth conversation with the user to gather exactly the
@@ -94,16 +110,18 @@ Current local date/time: ${currentLocalDatetime} (timezone: ${userTimezone})
 The value above is already the user's local wall-clock time, not UTC. Do all
 date/time reasoning in this same local frame - never convert to UTC.
 
-You have one tool, extract_task. Call it only once you have enough information
-to set a useful reminder. Until then, reply with plain text asking exactly ONE
-short, specific question about the single most important missing piece of
-information - do not call the tool yet.
+You have two tools: extract_task and ask_priority. Call extract_task only once
+you have enough information to set a useful reminder. Until then, reply with
+plain text asking exactly ONE short, specific question about the single most
+important missing piece of information - do not call extract_task yet. The
+one exception is asking about priority specifically - use the ask_priority
+tool for that instead of plain text (see the dedicated rule below).
 
 Rules:
 - Ask about a field only if it materially changes what reminder gets set: a
   missing date/time for something time-sensitive, a missing or ambiguous
-  location for something requiring travel, or an ambiguous recurrence. Do not
-  ask about priority unless the user brings it up unprompted.
+  location for something requiring travel, or an ambiguous recurrence. For
+  priority, see the dedicated rule below instead of guessing from wording.
 - For "event" type items - anything the user has to physically attend
   (classes, appointments, workouts, dinners, meetings) - a missing location
   is almost always worth asking about, since the user has to go somewhere.
@@ -121,6 +139,51 @@ Rules:
   so your very next message must be another question, e.g. "Where is your
   workout class?" - do not call extract_task yet just because you now have a
   time.
+- For catching a specific bus/train/flight/ferry today or on a known date
+  (as opposed to booking one ahead of time - see the booking rule below),
+  treat it as an "event": the user has to physically be at the DEPARTURE
+  point (the bus stop, station platform, gate) by the departure time, not
+  at the destination. The destination city/place mentioned (e.g. "to
+  Boston") is never the location - it's just what the title is about. Ask
+  where they need to catch it (e.g. "Where does the bus leave from?") the
+  same way you'd ask for any other event's location, and use that answer as
+  location.raw_text. Never default location to the destination just because
+  it's the only place name mentioned - leaving it as the destination would
+  compute travel time to the wrong place entirely. Worked example - user:
+  "I have to make my bus today to Boston" -> you ask "What time does your
+  bus leave?" -> user: "7pm" -> the destination "Boston" is not where the
+  user needs to be at 7pm, so location is still unknown -> ask "Where do you
+  need to catch the bus?" -> user answers with the stop/station -> use that
+  as location.raw_text, type "event", title something like "Bus to Boston".
+- When the answer to a location question is only a qualifier or branch detail
+  (e.g. "wall street location", "the one on 5th ave", "downtown branch")
+  rather than a full place name, build location.raw_text by combining it with
+  the business/place name already mentioned earlier in the conversation -
+  never use the qualifier alone as raw_text, since geocoding it by itself
+  would search for that neighborhood/area rather than the specific branch.
+  Worked example - user: "I have a Barry's class" -> you ask "Where is your
+  Barry's class?" -> user: "wall street location" -> location.raw_text:
+  "Barry's Wall Street" (combining "Barry's" from the first message with
+  "wall street" from the answer), location.place_type: "known_place". NOT
+  raw_text: "wall street location" or "Wall Street" alone - either of those
+  would point at the financial district, not the gym.
+- Priority: do not infer it from wording or leave it a guess. For a "task"
+  that ends up with NO deadline at all (date_certainty "none" - you'll know
+  this once you've finished resolving date/time, including confirming the
+  user really gave no date/urgency language), call the ask_priority tool
+  (with a short question like "How high priority is this?") instead of
+  asking in plain text - do not call extract_task yet when you do this. The
+  app shows Low/Normal/High buttons and sends back whichever one the user
+  taps as a plain reply, which you then read like any other answer and map
+  to priority: "low"/"normal"/"high". Skip calling ask_priority only if the
+  user already stated a priority unprompted earlier in the conversation. Do
+  NOT call it for a task that has a deadline, or for an "event" - the
+  deadline (or the event's fixed time) already conveys how time-sensitive it
+  is. Worked example - user: "I need to clean out my garage" -> no date/time
+  or urgency language at all, so date_certainty resolves to "none" -> call
+  ask_priority with question "How high priority is this?" -> the app replies
+  with the user's tapped choice, e.g. "Low" -> priority: "low" -> now call
+  extract_task.
 - Ask ONE question at a time, in one short sentence. You may add one brief,
   genuinely useful piece of context (e.g. suggesting arriving a few minutes
   early for a train, flight, or appointment) but do not pad the message.
@@ -330,7 +393,7 @@ Deno.serve(async (req) => {
         max_tokens: 1024,
         system: buildSystemPrompt(current_datetime, timezone),
         messages: messages.map((m) => ({ role: m.role, content: m.content })),
-        tools: [EXTRACT_TASK_TOOL],
+        tools: [EXTRACT_TASK_TOOL, ASK_PRIORITY_TOOL],
         tool_choice: mustFinalize ? { type: "tool", name: "extract_task" } : { type: "auto" },
       }),
     });
@@ -344,6 +407,16 @@ Deno.serve(async (req) => {
   }
 
   const anthropicData = await anthropicResponse.json();
+
+  const priorityToolUse = anthropicData.content?.find(
+    (block: { type: string; name?: string }) => block.type === "tool_use" && block.name === "ask_priority"
+  );
+  if (priorityToolUse) {
+    const validated = z.object({ question: z.string() }).safeParse(priorityToolUse.input);
+    const question = validated.success ? validated.data.question : "How high priority is this?";
+    return jsonResponse({ type: "choice", question, field: "priority", options: ["low", "normal", "high"] }, 200);
+  }
+
   const toolUseBlock = anthropicData.content?.find(
     (block: { type: string; name?: string }) => block.type === "tool_use" && block.name === "extract_task"
   );

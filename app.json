@@ -42,6 +42,21 @@
           "icon": "./assets/icon.png",
           "color": "#2563eb"
         }
+      ],
+      "@react-native-community/datetimepicker",
+      [
+        "expo-widgets",
+        {
+          "enablePushNotifications": true,
+          "widgets": [
+            {
+              "name": "DepartureActivity",
+              "displayName": "Departure Reminder",
+              "description": "Shows when you need to leave for an upcoming task or event.",
+              "supportedFamilies": ["systemSmall"]
+            }
+          ]
+        }
       ]
     ],
     "extra": {

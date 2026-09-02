@@ -1,6 +1,7 @@
 import { getCurrentUserLocation } from "./locationPermission";
 import { updateDepartureForTask } from "./scheduleDeparture";
 import { supabase } from "./supabase";
+import { syncDueNotification } from "./syncDueNotification";
 import type { TaskRow } from "../types/task";
 
 export type SnoozeOption = "1h" | "tomorrow" | "next_week";
@@ -42,6 +43,8 @@ export async function snoozeTask(task: TaskRow, option: SnoozeOption): Promise<T
 
   if (error || !data) return task;
   let updated = data as TaskRow;
+
+  updated = await syncDueNotification(updated);
 
   if (updated.location_raw_text) {
     const userLocation = await getCurrentUserLocation();

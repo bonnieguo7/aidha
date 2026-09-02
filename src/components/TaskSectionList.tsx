@@ -16,6 +16,7 @@ import { archivePastEvents } from "../lib/autoArchivePastEvents";
 import { confirmDelete } from "../lib/confirmDelete";
 import { openInMaps } from "../lib/maps";
 import { cancelNotification } from "../lib/notifications";
+import { refreshUpcomingDepartures } from "../lib/refreshUpcomingDepartures";
 import { supabase } from "../lib/supabase";
 import { colors } from "../lib/theme";
 import type { RecurringFrequency, TaskRow, TaskType } from "../types/task";
@@ -178,9 +179,15 @@ export default function TaskSectionList({
     }
 
     const rows = (data ?? []) as TaskRow[];
-    // Only the active (not-completed) list has anything for the sweep to do -
-    // querying is_completed=true (the Archive tab) already excludes them.
-    setAllTasks(completed ? rows : await archivePastEvents(rows));
+    // Only the active (not-completed) list has anything for the sweep or the
+    // departure recheck to do - querying is_completed=true (the Archive tab)
+    // already excludes them.
+    if (completed) {
+      setAllTasks(rows);
+      return;
+    }
+    const active = await archivePastEvents(rows);
+    setAllTasks(await refreshUpcomingDepartures(active));
   }
 
   useFocusEffect(
@@ -205,12 +212,17 @@ export default function TaskSectionList({
     const completing = !completed;
     const patch: Record<string, unknown> = { is_completed: completing };
 
-    // A completed/archived task shouldn't still ring a "time to leave" alert -
-    // cancel it and clear the stale id so the task doesn't misleadingly look like
-    // it still has an active reminder.
+    // A completed/archived task shouldn't still ring a "time to leave" alert,
+    // or its "at the scheduled time" one - cancel both and clear the stale
+    // ids so the task doesn't misleadingly look like it still has an active
+    // reminder.
     if (completing && item.leaving_notification_id) {
       await cancelNotification(item.leaving_notification_id);
       patch.leaving_notification_id = null;
+    }
+    if (completing && item.datetime_notification_id) {
+      await cancelNotification(item.datetime_notification_id);
+      patch.datetime_notification_id = null;
     }
 
     const { error: updateError } = await supabase.from("tasks").update(patch).eq("id", item.id);
@@ -227,6 +239,7 @@ export default function TaskSectionList({
     if (!confirmed) return;
 
     await cancelNotification(item.leaving_notification_id);
+    await cancelNotification(item.datetime_notification_id);
     const { error: deleteError } = await supabase.from("tasks").delete().eq("id", item.id);
     if (deleteError) {
       setError(deleteError.message);

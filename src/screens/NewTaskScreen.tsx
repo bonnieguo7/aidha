@@ -17,12 +17,21 @@ import { localIsoNow, localNaiveToUtcIso } from "../lib/localDatetime";
 import { getCurrentUserLocation } from "../lib/locationPermission";
 import { updateDepartureForTask } from "../lib/scheduleDeparture";
 import { supabase } from "../lib/supabase";
+import { syncDueNotification } from "../lib/syncDueNotification";
 import { colors } from "../lib/theme";
-import type { ConversationTurn, ParsedTask, ParseTaskResponse, TaskRow } from "../types/task";
+import type {
+  ConversationTurn,
+  ParsedTask,
+  ParseTaskResponse,
+  Priority,
+  TaskRow,
+} from "../types/task";
 import TaskCard from "../components/TaskCard";
+import PendingTaskFields from "../components/PendingTaskFields";
 
 const OPENING_QUESTION = "What do you need to remember?";
 const CONFIRMATION_MESSAGE = "Got it, here's what I've got:";
+const PRIORITY_LABELS: Record<Priority, string> = { low: "Low", normal: "Normal", high: "High" };
 
 function AssistantBubble({ children }: { children: React.ReactNode }) {
   return (
@@ -38,12 +47,18 @@ export default function NewTaskScreen() {
   const [isSaving, setIsSaving] = useState(false);
   const [result, setResult] = useState<ParsedTask | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Set when the model asked a multiple-choice question (currently only
+  // priority) via the ask_priority tool - while this is set, the input bar
+  // is replaced with tappable option buttons instead of a text field.
+  const [pendingChoiceOptions, setPendingChoiceOptions] = useState<Priority[] | null>(null);
+  // Whether the pending task's field editor is open beneath its card - toggled
+  // by the pencil icon beside the card, independent of confirming/saving it.
+  const [isEditingResult, setIsEditingResult] = useState(false);
 
-  async function handleSend() {
-    if (!draft.trim()) return;
-    const nextMessages: ConversationTurn[] = [...messages, { role: "user", content: draft.trim() }];
-    setMessages(nextMessages);
-    setDraft("");
+  // Shared by both a typed reply and a tapped choice button - either way, the
+  // new turn already has its content decided by the caller, this just sends
+  // the updated conversation and handles whatever comes back.
+  async function sendMessages(nextMessages: ConversationTurn[]) {
     setError(null);
     setIsSending(true);
 
@@ -60,8 +75,13 @@ export default function NewTaskScreen() {
       const response = data as ParseTaskResponse;
 
       if (response.type === "question") {
+        setPendingChoiceOptions(null);
+        setMessages([...nextMessages, { role: "assistant", content: response.question }]);
+      } else if (response.type === "choice") {
+        setPendingChoiceOptions(response.options);
         setMessages([...nextMessages, { role: "assistant", content: response.question }]);
       } else {
+        setPendingChoiceOptions(null);
         setResult(response.data);
       }
     } catch (err) {
@@ -69,6 +89,21 @@ export default function NewTaskScreen() {
     } finally {
       setIsSending(false);
     }
+  }
+
+  function handleSend() {
+    if (!draft.trim()) return;
+    const nextMessages: ConversationTurn[] = [...messages, { role: "user", content: draft.trim() }];
+    setMessages(nextMessages);
+    setDraft("");
+    sendMessages(nextMessages);
+  }
+
+  function handleChoiceSelect(option: Priority) {
+    const nextMessages: ConversationTurn[] = [...messages, { role: "user", content: PRIORITY_LABELS[option] }];
+    setMessages(nextMessages);
+    setPendingChoiceOptions(null);
+    sendMessages(nextMessages);
   }
 
   async function handleSave() {
@@ -101,6 +136,13 @@ export default function NewTaskScreen() {
       return;
     }
 
+    // Independent of the location-based "leaving by" reminder below - this one
+    // just fires at the task/event's own time, so it applies whenever there's
+    // a datetime at all, location or not.
+    if (result.datetime) {
+      await syncDueNotification(inserted as TaskRow);
+    }
+
     // A location + time is exactly what a "leaving by" reminder needs - compute
     // and schedule it now rather than waiting for the user to open the task again.
     let departureSkipped = false;
@@ -127,6 +169,7 @@ export default function NewTaskScreen() {
     setMessages([]);
     setResult(null);
     setDraft("");
+    setIsEditingResult(false);
   }
 
   function handleStartOver() {
@@ -134,6 +177,8 @@ export default function NewTaskScreen() {
     setResult(null);
     setDraft("");
     setError(null);
+    setPendingChoiceOptions(null);
+    setIsEditingResult(false);
   }
 
   return (
@@ -166,12 +211,49 @@ export default function NewTaskScreen() {
         )}
 
         {result && (
-          <AssistantBubble>
-            <Text style={styles.bubbleTextAssistant}>{result.confirmation_note ?? CONFIRMATION_MESSAGE}</Text>
-            <View style={styles.cardWrap}>
-              <TaskCard task={result} />
+          <View style={styles.resultSection}>
+            <View style={styles.introRow}>
+              <View style={[styles.bubble, styles.bubbleAssistant, styles.resultBubble]}>
+                <Text style={styles.bubbleTextAssistant}>{result.confirmation_note ?? CONFIRMATION_MESSAGE}</Text>
+                {!isEditingResult && (
+                  <View style={styles.cardWrap}>
+                    <TaskCard task={result} />
+                  </View>
+                )}
+              </View>
+              <View style={styles.cardActionsColumn}>
+                <Pressable
+                  onPress={() => setIsEditingResult((prev) => !prev)}
+                  style={styles.cardActionButton}
+                  hitSlop={4}
+                >
+                  <Ionicons
+                    name={isEditingResult ? "close-outline" : "pencil-outline"}
+                    size={16}
+                    color={colors.textSecondary}
+                  />
+                </Pressable>
+                <Pressable
+                  onPress={handleSave}
+                  disabled={isSaving}
+                  style={[styles.cardActionButton, styles.cardActionConfirm, isSaving && styles.buttonDisabled]}
+                  hitSlop={4}
+                >
+                  {isSaving ? (
+                    <ActivityIndicator color={colors.onSurfaceInverse} size="small" />
+                  ) : (
+                    <Ionicons name="checkmark" size={18} color={colors.onSurfaceInverse} />
+                  )}
+                </Pressable>
+              </View>
             </View>
-          </AssistantBubble>
+
+            {isEditingResult && (
+              <View style={styles.editorWrap}>
+                <PendingTaskFields task={result} onChange={setResult} />
+              </View>
+            )}
+          </View>
         )}
 
         {error && <Text style={styles.error}>{error}</Text>}
@@ -182,17 +264,19 @@ export default function NewTaskScreen() {
           <Pressable onPress={handleStartOver} style={styles.secondaryButton}>
             <Text style={styles.secondaryButtonText}>Start a new task</Text>
           </Pressable>
-          <Pressable
-            onPress={handleSave}
-            disabled={isSaving}
-            style={[styles.primaryButton, isSaving && styles.buttonDisabled]}
-          >
-            {isSaving ? (
-              <ActivityIndicator color={colors.onSurfaceInverse} size="small" />
-            ) : (
-              <Text style={styles.primaryButtonText}>Save</Text>
-            )}
-          </Pressable>
+        </View>
+      ) : pendingChoiceOptions ? (
+        <View style={styles.choiceBar}>
+          {pendingChoiceOptions.map((option) => (
+            <Pressable
+              key={option}
+              onPress={() => handleChoiceSelect(option)}
+              disabled={isSending}
+              style={[styles.choiceButton, isSending && styles.buttonDisabled]}
+            >
+              <Text style={styles.choiceButtonText}>{PRIORITY_LABELS[option]}</Text>
+            </Pressable>
+          ))}
         </View>
       ) : (
         <View style={styles.inputBar}>
@@ -253,7 +337,39 @@ const styles = StyleSheet.create({
     fontSize: 16,
     lineHeight: 21,
   },
+  resultSection: {
+    marginBottom: 10,
+  },
+  introRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    maxWidth: "86%",
+    gap: 8,
+  },
+  resultBubble: {
+    maxWidth: "100%",
+    flexShrink: 1,
+    marginBottom: 0,
+  },
   cardWrap: {
+    marginTop: 10,
+  },
+  cardActionsColumn: {
+    gap: 8,
+    paddingTop: 2,
+  },
+  cardActionButton: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: colors.surfaceAlt,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  cardActionConfirm: {
+    backgroundColor: colors.success,
+  },
+  editorWrap: {
     marginTop: 10,
   },
   error: {
@@ -288,19 +404,40 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  choiceBar: {
+    flexDirection: "row",
+    gap: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+    backgroundColor: colors.surface,
+  },
+  choiceButton: {
+    flex: 1,
+    backgroundColor: colors.accentSoft,
+    borderRadius: 20,
+    paddingVertical: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  choiceButtonText: {
+    color: colors.accent,
+    fontSize: 15,
+    fontWeight: "600",
+  },
   buttonDisabled: {
     opacity: 0.5,
   },
   actionsBar: {
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "space-between",
+    justifyContent: "center",
     paddingHorizontal: 16,
     paddingVertical: 12,
     borderTopWidth: 1,
     borderTopColor: colors.border,
     backgroundColor: colors.surface,
-    gap: 12,
   },
   secondaryButton: {
     paddingVertical: 10,
@@ -309,18 +446,5 @@ const styles = StyleSheet.create({
   secondaryButtonText: {
     color: colors.textSecondary,
     fontSize: 14,
-  },
-  primaryButton: {
-    backgroundColor: colors.accent,
-    borderRadius: 20,
-    paddingVertical: 10,
-    paddingHorizontal: 24,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  primaryButtonText: {
-    color: colors.onSurfaceInverse,
-    fontSize: 16,
-    fontWeight: "600",
   },
 });

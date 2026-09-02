@@ -4,7 +4,7 @@ import { reverseGeocodeLabel } from "./locationPermission";
 import { cancelNotification, scheduleLeavingNotification } from "./notifications";
 import { computeLeavingBy } from "./leavingBy";
 import { supabase } from "./supabase";
-import { getTravelDuration } from "./travelTime";
+import { selectTravelRoute } from "./travelTime";
 import type { TaskRow } from "../types/task";
 
 const CLEARED_DEPARTURE_FIELDS = {
@@ -65,7 +65,7 @@ export async function updateDepartureForTask(task: TaskRow, userLocation: Coords
   }
 
   const eventTime = new Date(task.datetime);
-  const travelResult = await getTravelDuration(userLocation, destination, eventTime);
+  const travelResult = await selectTravelRoute(userLocation, destination, eventTime);
   if (travelResult === null) {
     await cancelNotification(task.leaving_notification_id);
     return applyPatch(task, {
