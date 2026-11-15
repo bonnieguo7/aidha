@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useFocusEffect } from "@react-navigation/native";
 import {
   ActivityIndicator,
+  Animated,
   Pressable,
   RefreshControl,
   ScrollView,
@@ -13,12 +14,14 @@ import {
 } from "react-native";
 import CalendarMonthView, { dateKey } from "./CalendarMonthView";
 import { archivePastEvents } from "../lib/autoArchivePastEvents";
+import { completeTask } from "../lib/completeTask";
 import { confirmDelete } from "../lib/confirmDelete";
 import { openInMaps } from "../lib/maps";
 import { cancelNotification } from "../lib/notifications";
 import { refreshUpcomingDepartures } from "../lib/refreshUpcomingDepartures";
 import { supabase } from "../lib/supabase";
 import { colors } from "../lib/theme";
+import { configureRemovalAnimation, useCompleteAnimation } from "../lib/useCompleteAnimation";
 import type { RecurringFrequency, TaskRow, TaskType } from "../types/task";
 
 interface Section {
@@ -122,28 +125,37 @@ export default function TaskSectionList({
   }, [initialViewMode, initialEventView]);
   const [selectedDate, setSelectedDate] = useState(() => new Date());
   const [allTasks, setAllTasks] = useState<TaskRow[]>([]);
+  // Calendar-only: every event regardless of is_completed, so the Tasks tab's
+  // calendar still shows old events after they've auto-archived (see
+  // archivePastEvents in loadTasks) instead of losing them once their date
+  // passes. Only populated for the non-archive tab - see loadTasks.
+  const [allEvents, setAllEvents] = useState<TaskRow[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const sections = useMemo(() => buildSections(allTasks, viewMode), [allTasks, viewMode]);
 
-  // Which calendar days get a dot - any date an event (this tab's completed/not
-  // filter already applied by the query) falls on.
+  // The Archive tab's calendar still shows only archived events (its own
+  // is_completed-filtered allTasks); the Tasks tab's calendar shows every
+  // event ever created (allEvents), so old events don't disappear from it.
+  const calendarSource = completed ? allTasks : allEvents;
+
+  // Which calendar days get a dot - any date an event in calendarSource falls on.
   const eventDates = useMemo(() => {
     const set = new Set<string>();
-    for (const t of allTasks) {
+    for (const t of calendarSource) {
       if (t.type === "event" && t.datetime) set.add(dateKey(new Date(t.datetime)));
     }
     return set;
-  }, [allTasks]);
+  }, [calendarSource]);
 
   const selectedDateEvents = useMemo(() => {
     const key = dateKey(selectedDate);
-    return allTasks
+    return calendarSource
       .filter((t) => t.type === "event" && t.datetime && dateKey(new Date(t.datetime)) === key)
       .sort((a, b) => (a.datetime! < b.datetime! ? -1 : 1));
-  }, [allTasks, selectedDate]);
+  }, [calendarSource, selectedDate]);
 
   // Swiping/tapping to a different month leaves the old selected day showing an
   // agenda for a day you can no longer see - jump to "today" if it's back in
@@ -188,6 +200,20 @@ export default function TaskSectionList({
     }
     const active = await archivePastEvents(rows);
     setAllTasks(await refreshUpcomingDepartures(active));
+
+    // Separate, unfiltered fetch for the calendar: rows above only cover
+    // is_completed=false, so a past event that archivePastEvents just flipped
+    // to completed (or that was archived on an earlier visit) would vanish
+    // from the Tasks tab's calendar the moment its date passes. Fetch every
+    // event regardless of completion so the calendar keeps showing history.
+    const { data: eventRows, error: eventsError } = await supabase
+      .from("tasks")
+      .select("*")
+      .eq("type", "event")
+      .order("datetime", { ascending: true });
+    if (!eventsError) {
+      setAllEvents((eventRows ?? []) as TaskRow[]);
+    }
   }
 
   useFocusEffect(
@@ -209,29 +235,32 @@ export default function TaskSectionList({
   }
 
   async function handleToggleComplete(item: TaskRow) {
-    const completing = !completed;
-    const patch: Record<string, unknown> = { is_completed: completing };
-
-    // A completed/archived task shouldn't still ring a "time to leave" alert,
-    // or its "at the scheduled time" one - cancel both and clear the stale
-    // ids so the task doesn't misleadingly look like it still has an active
-    // reminder.
-    if (completing && item.leaving_notification_id) {
-      await cancelNotification(item.leaving_notification_id);
-      patch.leaving_notification_id = null;
-    }
-    if (completing && item.datetime_notification_id) {
-      await cancelNotification(item.datetime_notification_id);
-      patch.datetime_notification_id = null;
-    }
-
-    const { error: updateError } = await supabase.from("tasks").update(patch).eq("id", item.id);
-
-    if (updateError) {
-      setError(updateError.message);
+    // Restoring from the Archive tab: nothing to cancel or generate.
+    if (completed) {
+      const { error: updateError } = await supabase.from("tasks").update({ is_completed: false }).eq("id", item.id);
+      if (updateError) {
+        setError(updateError.message);
+        return;
+      }
+      configureRemovalAnimation();
+      removeTask(item.id);
       return;
     }
+
+    // Completing also cancels the task's reminders (a completed task shouldn't
+    // still ring a "time to leave" alert) and, for a repeating task, creates
+    // its next occurrence.
+    const { next, error: completeError } = await completeTask(item);
+    if (completeError) {
+      setError(completeError);
+      return;
+    }
+    configureRemovalAnimation();
     removeTask(item.id);
+    if (next) {
+      setAllTasks((prev) => [...prev, next]);
+      if (next.type === "event") setAllEvents((prev) => [...prev, next]);
+    }
   }
 
   async function handleDelete(item: TaskRow) {
@@ -249,67 +278,15 @@ export default function TaskSectionList({
   }
 
   function renderTaskRow(item: TaskRow) {
-    const metaText =
-      viewMode === "task"
-        ? item.recurring_frequency
-          ? capitalize(item.recurring_frequency)
-          : item.datetime
-            ? formatShortDate(item.datetime)
-            : null
-        : null;
-
-    // Events archive themselves once their time passes (see loadTasks) rather
-    // than being manually checked off - so the checkbox only makes sense for
-    // tasks, or for an already-archived event (where it still works as an
-    // "undo" back out of the Archive tab).
-    const showCheckbox = item.type !== "event" || completed;
-
     return (
-      <View style={styles.row}>
-        {showCheckbox && (
-          <Pressable
-            onPress={() => handleToggleComplete(item)}
-            style={({ pressed }) => [styles.checkboxButton, pressed && styles.rowPressed]}
-            hitSlop={8}
-          >
-            <Ionicons
-              name={completed ? "checkbox" : "square-outline"}
-              size={22}
-              color={completed ? colors.success : colors.textMuted}
-            />
-          </Pressable>
-        )}
-        <Pressable
-          style={({ pressed }) => [styles.rowContent, pressed && styles.rowPressed]}
-          onPress={() => onSelectTask(item)}
-        >
-          <View style={styles.rowMain}>
-            <Text style={[styles.rowTitle, completed && styles.rowTitleCompleted]}>{item.title}</Text>
-            {viewMode === "event" && item.datetime && (
-              <Text style={styles.rowSubtitle}>{formatDatetime(item.datetime)}</Text>
-            )}
-            {item.location_raw_text && (
-              <Pressable
-                onPress={() => openInMaps(item.resolved_address ?? item.location_raw_text!)}
-                hitSlop={6}
-                style={styles.locationRow}
-              >
-                <Ionicons name="navigate-outline" size={12} color={colors.accent} />
-                <Text style={styles.rowSubtitleLink}>{item.location_raw_text}</Text>
-              </Pressable>
-            )}
-          </View>
-          {metaText && <Text style={styles.metaText}>{metaText}</Text>}
-          <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
-        </Pressable>
-        <Pressable
-          onPress={() => handleDelete(item)}
-          style={({ pressed }) => [styles.deleteIconButton, pressed && styles.rowPressed]}
-          hitSlop={8}
-        >
-          <Ionicons name="trash-outline" size={18} color={colors.danger} />
-        </Pressable>
-      </View>
+      <TaskListRow
+        item={item}
+        viewMode={viewMode}
+        completed={completed}
+        onSelect={() => onSelectTask(item)}
+        onToggleComplete={() => handleToggleComplete(item)}
+        onDelete={() => handleDelete(item)}
+      />
     );
   }
 
@@ -410,6 +387,84 @@ export default function TaskSectionList({
         />
       )}
     </View>
+  );
+}
+
+function TaskListRow({
+  item,
+  viewMode,
+  completed,
+  onSelect,
+  onToggleComplete,
+  onDelete,
+}: {
+  item: TaskRow;
+  viewMode: TaskType;
+  completed: boolean;
+  onSelect: () => void;
+  onToggleComplete: () => void;
+  onDelete: () => void;
+}) {
+  const { animatedStyle, playComplete } = useCompleteAnimation();
+
+  const metaText =
+    viewMode === "task"
+      ? item.recurring_frequency
+        ? capitalize(item.recurring_frequency)
+        : item.datetime
+          ? formatShortDate(item.datetime)
+          : null
+      : null;
+
+  // Events archive themselves once their time passes (see loadTasks) rather
+  // than being manually checked off - so the checkbox only makes sense for
+  // tasks, or for an already-archived event (where it still works as an
+  // "undo" back out of the Archive tab).
+  const showCheckbox = item.type !== "event" || completed;
+
+  return (
+    <Animated.View style={[styles.row, animatedStyle]}>
+      {showCheckbox && (
+        <Pressable
+          onPress={() => playComplete(onToggleComplete)}
+          style={({ pressed }) => [styles.checkboxButton, pressed && styles.rowPressed]}
+          hitSlop={8}
+        >
+          <Ionicons
+            name={completed ? "checkbox" : "square-outline"}
+            size={22}
+            color={completed ? colors.success : colors.textMuted}
+          />
+        </Pressable>
+      )}
+      <Pressable style={({ pressed }) => [styles.rowContent, pressed && styles.rowPressed]} onPress={onSelect}>
+        <View style={styles.rowMain}>
+          <Text style={[styles.rowTitle, completed && styles.rowTitleCompleted]}>{item.title}</Text>
+          {viewMode === "event" && item.datetime && (
+            <Text style={styles.rowSubtitle}>{formatDatetime(item.datetime)}</Text>
+          )}
+          {item.location_raw_text && (
+            <Pressable
+              onPress={() => openInMaps(item.resolved_address ?? item.location_raw_text!)}
+              hitSlop={6}
+              style={styles.locationRow}
+            >
+              <Ionicons name="navigate-outline" size={12} color={colors.accent} />
+              <Text style={styles.rowSubtitleLink}>{item.location_raw_text}</Text>
+            </Pressable>
+          )}
+        </View>
+        {metaText && <Text style={styles.metaText}>{metaText}</Text>}
+        <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+      </Pressable>
+      <Pressable
+        onPress={onDelete}
+        style={({ pressed }) => [styles.deleteIconButton, pressed && styles.rowPressed]}
+        hitSlop={8}
+      >
+        <Ionicons name="trash-outline" size={18} color={colors.danger} />
+      </Pressable>
+    </Animated.View>
   );
 }
 

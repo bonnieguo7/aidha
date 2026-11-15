@@ -1,5 +1,6 @@
 import { Ionicons } from "@expo/vector-icons";
-import { useState } from "react";
+import { useFocusEffect } from "@react-navigation/native";
+import { useCallback, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -15,23 +16,17 @@ import {
 import { useAuth } from "../lib/AuthContext";
 import { localIsoNow, localNaiveToUtcIso } from "../lib/localDatetime";
 import { getCurrentUserLocation } from "../lib/locationPermission";
+import { fetchRecentLocations } from "../lib/recentLocations";
 import { updateDepartureForTask } from "../lib/scheduleDeparture";
 import { supabase } from "../lib/supabase";
 import { syncDueNotification } from "../lib/syncDueNotification";
 import { colors } from "../lib/theme";
-import type {
-  ConversationTurn,
-  ParsedTask,
-  ParseTaskResponse,
-  Priority,
-  TaskRow,
-} from "../types/task";
+import type { ConversationTurn, ParsedTask, ParseTaskResponse, TaskRow } from "../types/task";
 import TaskCard from "../components/TaskCard";
 import PendingTaskFields from "../components/PendingTaskFields";
 
 const OPENING_QUESTION = "What do you need to remember?";
 const CONFIRMATION_MESSAGE = "Got it, here's what I've got:";
-const PRIORITY_LABELS: Record<Priority, string> = { low: "Low", normal: "Normal", high: "High" };
 
 function AssistantBubble({ children }: { children: React.ReactNode }) {
   return (
@@ -47,19 +42,29 @@ export default function NewTaskScreen() {
   const [isSaving, setIsSaving] = useState(false);
   const [result, setResult] = useState<ParsedTask | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // Set when the model asked a multiple-choice question (currently only
-  // priority) via the ask_priority tool - while this is set, the input bar
-  // is replaced with tappable option buttons instead of a text field.
-  const [pendingChoiceOptions, setPendingChoiceOptions] = useState<Priority[] | null>(null);
+  // Likely answers the model offered for its latest question, shown as
+  // tappable buttons above the input bar. Purely a shortcut - the text field
+  // is always available for a different answer.
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+  // The user's usual places, offered as the answer buttons whenever the model
+  // asks where something is. Kept on the device - never sent to the model.
+  const [recentLocations, setRecentLocations] = useState<string[]>([]);
+
+  useFocusEffect(
+    useCallback(() => {
+      fetchRecentLocations().then(setRecentLocations);
+    }, [])
+  );
   // Whether the pending task's field editor is open beneath its card - toggled
   // by the pencil icon beside the card, independent of confirming/saving it.
   const [isEditingResult, setIsEditingResult] = useState(false);
 
-  // Shared by both a typed reply and a tapped choice button - either way, the
+  // Shared by both a typed reply and a tapped suggestion - either way, the
   // new turn already has its content decided by the caller, this just sends
   // the updated conversation and handles whatever comes back.
   async function sendMessages(nextMessages: ConversationTurn[]) {
     setError(null);
+    setSuggestions([]);
     setIsSending(true);
 
     try {
@@ -75,13 +80,11 @@ export default function NewTaskScreen() {
       const response = data as ParseTaskResponse;
 
       if (response.type === "question") {
-        setPendingChoiceOptions(null);
-        setMessages([...nextMessages, { role: "assistant", content: response.question }]);
-      } else if (response.type === "choice") {
-        setPendingChoiceOptions(response.options);
+        // For "where is it?", only ever the user's own places - the model's
+        // list is ignored so it can't put an invented place on a button.
+        setSuggestions(response.topic === "location" ? recentLocations : (response.suggestions ?? []));
         setMessages([...nextMessages, { role: "assistant", content: response.question }]);
       } else {
-        setPendingChoiceOptions(null);
         setResult(response.data);
       }
     } catch (err) {
@@ -99,10 +102,10 @@ export default function NewTaskScreen() {
     sendMessages(nextMessages);
   }
 
-  function handleChoiceSelect(option: Priority) {
-    const nextMessages: ConversationTurn[] = [...messages, { role: "user", content: PRIORITY_LABELS[option] }];
+  function handleSuggestionSelect(suggestion: string) {
+    const nextMessages: ConversationTurn[] = [...messages, { role: "user", content: suggestion }];
     setMessages(nextMessages);
-    setPendingChoiceOptions(null);
+    setDraft("");
     sendMessages(nextMessages);
   }
 
@@ -126,6 +129,7 @@ export default function NewTaskScreen() {
         recurring_detail: result.recurring?.interval_detail ?? null,
         priority: result.priority,
         requires_downtime: result.requires_downtime,
+        duration_minutes: result.type === "event" ? result.duration_minutes : null,
       })
       .select()
       .single();
@@ -177,9 +181,11 @@ export default function NewTaskScreen() {
     setResult(null);
     setDraft("");
     setError(null);
-    setPendingChoiceOptions(null);
+    setSuggestions([]);
     setIsEditingResult(false);
   }
+
+  const showSuggestions = suggestions.length > 0 && !isSending;
 
   return (
     <KeyboardAvoidingView
@@ -265,36 +271,38 @@ export default function NewTaskScreen() {
             <Text style={styles.secondaryButtonText}>Start a new task</Text>
           </Pressable>
         </View>
-      ) : pendingChoiceOptions ? (
-        <View style={styles.choiceBar}>
-          {pendingChoiceOptions.map((option) => (
-            <Pressable
-              key={option}
-              onPress={() => handleChoiceSelect(option)}
-              disabled={isSending}
-              style={[styles.choiceButton, isSending && styles.buttonDisabled]}
-            >
-              <Text style={styles.choiceButtonText}>{PRIORITY_LABELS[option]}</Text>
-            </Pressable>
-          ))}
-        </View>
       ) : (
-        <View style={styles.inputBar}>
-          <TextInput
-            style={styles.replyInput}
-            placeholder="Reply..."
-            placeholderTextColor={colors.textMuted}
-            value={draft}
-            onChangeText={setDraft}
-            multiline
-          />
-          <Pressable
-            onPress={handleSend}
-            disabled={isSending || !draft.trim()}
-            style={[styles.sendButton, (isSending || !draft.trim()) && styles.buttonDisabled]}
-          >
-            <Ionicons name="arrow-up" size={18} color={colors.onSurfaceInverse} />
-          </Pressable>
+        <View>
+          {showSuggestions && (
+            <View style={styles.suggestionsBar}>
+              {suggestions.map((suggestion) => (
+                <Pressable
+                  key={suggestion}
+                  onPress={() => handleSuggestionSelect(suggestion)}
+                  style={styles.suggestionChip}
+                >
+                  <Text style={styles.suggestionChipText}>{suggestion}</Text>
+                </Pressable>
+              ))}
+            </View>
+          )}
+          <View style={[styles.inputBar, showSuggestions && styles.inputBarUnderSuggestions]}>
+            <TextInput
+              style={styles.replyInput}
+              placeholder={suggestions.length > 0 ? "Or type your own..." : "Reply..."}
+              placeholderTextColor={colors.textMuted}
+              value={draft}
+              onChangeText={setDraft}
+              multiline
+            />
+            <Pressable
+              onPress={handleSend}
+              disabled={isSending || !draft.trim()}
+              style={[styles.sendButton, (isSending || !draft.trim()) && styles.buttonDisabled]}
+            >
+              <Ionicons name="arrow-up" size={18} color={colors.onSurfaceInverse} />
+            </Pressable>
+          </View>
         </View>
       )}
     </KeyboardAvoidingView>
@@ -380,10 +388,18 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "flex-end",
     paddingHorizontal: 16,
-    paddingVertical: 10,
+    paddingTop: 10,
+    // Extra bottom padding beyond paddingTop's 10 - KeyboardAvoidingView
+    // otherwise docks this bar flush against the top of the keyboard with
+    // no breathing room.
+    paddingBottom: 20,
     borderTopWidth: 1,
     borderTopColor: colors.border,
     backgroundColor: colors.surface,
+  },
+  // The suggestions bar above already draws the divider line.
+  inputBarUnderSuggestions: {
+    borderTopWidth: 0,
   },
   replyInput: {
     flex: 1,
@@ -404,24 +420,24 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  choiceBar: {
+  suggestionsBar: {
     flexDirection: "row",
-    gap: 10,
+    flexWrap: "wrap",
+    gap: 8,
     paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingTop: 10,
+    paddingBottom: 2,
     borderTopWidth: 1,
     borderTopColor: colors.border,
     backgroundColor: colors.surface,
   },
-  choiceButton: {
-    flex: 1,
+  suggestionChip: {
     backgroundColor: colors.accentSoft,
-    borderRadius: 20,
-    paddingVertical: 12,
-    alignItems: "center",
-    justifyContent: "center",
+    borderRadius: 18,
+    paddingVertical: 9,
+    paddingHorizontal: 14,
   },
-  choiceButtonText: {
+  suggestionChipText: {
     color: colors.accent,
     fontSize: 15,
     fontWeight: "600",

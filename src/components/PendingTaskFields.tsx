@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { TextInput, View } from "react-native";
-import { EditorActions, FieldRow, SegmentedControl, fieldEditorStyles } from "./FieldEditorUI";
+import { DurationPicker, EditorActions, FieldRow, SegmentedControl, fieldEditorStyles } from "./FieldEditorUI";
 import DatePickerField from "./DatePickerField";
 import TimePickerField from "./TimePickerField";
+import { formatDuration } from "../lib/duration";
 import { colors } from "../lib/theme";
 import type { ParsedTask, Priority, RecurringFrequency, TaskType } from "../types/task";
 
@@ -65,6 +66,7 @@ export default function PendingTaskFields({
   const [typeDraft, setTypeDraft] = useState<TaskType>(task.type);
   const [dateDraft, setDateDraft] = useState(dateParts.date);
   const [timeDraft, setTimeDraft] = useState(dateParts.time);
+  const [durationDraft, setDurationDraft] = useState<number | null>(task.duration_minutes);
   const [locationDraft, setLocationDraft] = useState(task.location?.raw_text ?? "");
   const [priorityDraft, setPriorityDraft] = useState<Priority | typeof NO_PRIORITY>(task.priority ?? NO_PRIORITY);
   const [recurrenceFrequencyDraft, setRecurrenceFrequencyDraft] = useState<
@@ -98,6 +100,9 @@ export default function PendingTaskFields({
         break;
       case "time":
         setTimeDraft(parts.time);
+        break;
+      case "duration":
+        setDurationDraft(task.duration_minutes);
         break;
       case "location":
         setLocationDraft(task.location?.raw_text ?? "");
@@ -133,6 +138,11 @@ export default function PendingTaskFields({
     if (!dateParts.date) return;
     onChange({ ...task, datetime: datePartsToNaiveIso(dateParts.date, timeDraft) });
     closeField("time");
+  }
+
+  function handleSaveDuration() {
+    onChange({ ...task, duration_minutes: durationDraft });
+    closeField("duration");
   }
 
   function handleSaveLocation() {
@@ -218,6 +228,19 @@ export default function PendingTaskFields({
         >
           <TimePickerField value={timeDraft} onChange={setTimeDraft} />
           <EditorActions onSave={handleSaveTime} onCancel={() => closeField("time")} saving={false} />
+        </FieldRow>
+      )}
+
+      {showDateTimeRows && task.type === "event" && (
+        <FieldRow
+          icon="hourglass-outline"
+          label="Duration"
+          value={task.duration_minutes ? formatDuration(task.duration_minutes) : "Not set"}
+          expanded={!!expanded.duration}
+          onToggle={() => toggleField("duration")}
+        >
+          <DurationPicker value={durationDraft} onChange={setDurationDraft} />
+          <EditorActions onSave={handleSaveDuration} onCancel={() => closeField("duration")} saving={false} />
         </FieldRow>
       )}
 

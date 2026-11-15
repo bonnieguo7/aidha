@@ -5,8 +5,8 @@ AI-assisted task/reminder capture. Type a task or event in plain language, an LL
 
 This build covers the input -> parse -> confirm -> save pipeline, plus "leaving
 by" departure reminders (geocode the task's location, estimate travel time,
-schedule a local notification). Recurring-task scheduling and downtime
-detection are not implemented yet.
+schedule a local notification) and recurring tasks (completing one creates the
+next occurrence). Downtime-aware suggestions are not implemented yet.
 
 ## Stack
 
@@ -29,6 +29,10 @@ aidha/
       locationPermission.ts    expo-location foreground permission + position
       notifications.ts          expo-notifications schedule/cancel
       leavingBy.ts              computeLeavingBy pure function (unit tested)
+      recurrence.ts             computeNextOccurrence pure function (unit tested)
+      dayLayout.ts              day-view block + overlap layout (pure, unit tested)
+      duration.ts               event duration helpers: end time, in-progress, formatting
+      completeTask.ts           complete + create next occurrence of a recurring task
       scheduleDeparture.ts      updateDepartureForTask orchestration
       constants.ts              DEPARTURE_BUFFER_MINUTES
     screens/
@@ -38,12 +42,15 @@ aidha/
       EditTaskScreen.tsx         per-field edit + "Ask AI" NL edit + Leaving by
     components/
       TaskCard.tsx               structured result card, flags needs_clarification
+      DayView.tsx                Today's "Day" mode: date nav + loads a day's tasks
+      DayTimeline.tsx            24-hour grid with event blocks and "leave by" blocks
     types/
       task.ts                    ParsedTask (LLM output) + TaskRow (DB row)
   supabase/
     migrations/
       ..._create_tasks_table.sql       tasks table + row-level security policies
       ..._add_departure_fields.sql     latitude/longitude/leaving_by/etc.
+      ..._add_duration_minutes.sql     events' duration_minutes (null = none set)
     functions/
       parse-task/index.ts        Deno Edge Function: calls Claude, validates w/ Zod
       edit-task/index.ts         NL task edits + title-sync
@@ -89,7 +96,7 @@ The Supabase CLI is available via `npx`, no global install needed.
 ```bash
 npx supabase login
 npx supabase link --project-ref <your-project-ref>
-npx supabase db push
+npx supabase db push --remote
 ```
 
 This creates the `tasks` table and its RLS policies (see

@@ -1,5 +1,6 @@
 import { Ionicons } from "@expo/vector-icons";
 import { StyleSheet, Text, View } from "react-native";
+import { formatDuration } from "../lib/duration";
 import { colors } from "../lib/theme";
 import type { ClarificationField, ParsedTask } from "../types/task";
 
@@ -46,7 +47,8 @@ export default function TaskCard({ task }: { task: ParsedTask }) {
 
   const showWhen = Boolean(task.datetime) || task.date_certainty !== "none" || isFlagged("datetime");
   const whenText = task.datetime
-    ? formatDatetime(task.datetime)
+    ? formatDatetime(task.datetime) +
+      (task.type === "event" && task.duration_minutes ? ` · ${formatDuration(task.duration_minutes)}` : "")
     : task.date_certainty === "approximate"
       ? "Soon (no fixed time)"
       : "No deadline set";
@@ -87,7 +89,9 @@ export default function TaskCard({ task }: { task: ParsedTask }) {
           icon="repeat-outline"
           text={
             task.recurring
-              ? `Repeats ${task.recurring.frequency} (${task.recurring.interval_detail})`
+              ? `Repeats ${task.recurring.frequency}${
+                  task.recurring.interval_detail ? ` (${task.recurring.interval_detail})` : ""
+                }`
               : "Recurrence unclear"
           }
           flagged={isFlagged("recurrence")}

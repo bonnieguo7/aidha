@@ -5,6 +5,7 @@ import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import {
   ActivityIndicator,
   Alert,
+  Animated,
   Pressable,
   RefreshControl,
   ScrollView,
@@ -14,18 +15,23 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useAuth } from "../lib/AuthContext";
+import DayView from "../components/DayView";
 import { archivePastEvents } from "../lib/autoArchivePastEvents";
-import { cancelNotification } from "../lib/notifications";
+import { getCurrentUserLocation } from "../lib/locationPermission";
+import { completeTask } from "../lib/completeTask";
+import { eventEnd, isInProgress } from "../lib/duration";
 import { refreshUpcomingDepartures } from "../lib/refreshUpcomingDepartures";
+import { updateDepartureForTask } from "../lib/scheduleDeparture";
 import { snoozeTask, type SnoozeOption } from "../lib/snoozeTask";
 import { supabase } from "../lib/supabase";
+import { configureRemovalAnimation, useCompleteAnimation } from "../lib/useCompleteAnimation";
 import { colors } from "../lib/theme";
 import type { TasksStackParamList } from "../navigation/types";
-import type { TaskRow } from "../types/task";
+import type { Priority, TaskRow } from "../types/task";
 
 type Props = NativeStackScreenProps<TasksStackParamList, "TodayList">;
 
-type HeroReason = "leaving" | "upcoming" | "overdue" | "priority";
+type HeroReason = "leaving" | "upcoming" | "now" | "overdue" | "priority";
 type SectionKind = "overdue" | "laterToday" | "priority" | "flexible";
 
 interface TodayGroups {
@@ -76,13 +82,19 @@ function buildTodayGroups(rows: TaskRow[], now: Date): TodayGroups {
   // whose datetime may just be a computed few-days-ahead nudge, not a fixed
   // moment) always routes to "When you have time" instead of the date/
   // priority-based sections below, whether or not it happens to have a date.
+  // An event that has started but not yet ended (it has a duration) is
+  // happening now - not overdue - so it's kept out of this list and shown with
+  // the rest of today instead.
   const overdue = rows
-    .filter((t) => !t.requires_downtime && t.datetime && new Date(t.datetime) < now)
+    .filter((t) => !t.requires_downtime && t.datetime && new Date(t.datetime) < now && !isInProgress(t, now))
     .sort((a, b) => (a.datetime! < b.datetime! ? -1 : 1));
 
   const laterToday = rows
     .filter(
-      (t) => !t.requires_downtime && t.datetime && new Date(t.datetime) >= now && new Date(t.datetime) < startOfTomorrow
+      (t) =>
+        !t.requires_downtime &&
+        t.datetime &&
+        (isInProgress(t, now) || (new Date(t.datetime) >= now && new Date(t.datetime) < startOfTomorrow))
     )
     .sort((a, b) => {
       // A leaving_by that's already passed is still the more urgent signal
@@ -105,7 +117,7 @@ function buildTodayGroups(rows: TaskRow[], now: Date): TodayGroups {
     // - formatRelative collapses anything <= 1 minute (including negative,
     // i.e. already past) into "now", so the pill reads "Leave now" instead of
     // silently disappearing right when it matters most.
-    heroReason = hero.leaving_by ? "leaving" : "upcoming";
+    heroReason = isInProgress(hero, now) ? "now" : hero.leaving_by ? "leaving" : "upcoming";
   } else if (overdue.length > 0) {
     hero = overdue[0];
     heroReason = "overdue";
@@ -136,6 +148,45 @@ function sectionAccent(kind: SectionKind): { text: string; soft: string } {
   return { text: colors.accent, soft: colors.accentSoft };
 }
 
+// Only used for the "flexible" ("When you have time") section - every other
+// section already has its own meaningful accent color (overdue/laterToday/
+// priority), so recoloring by priority there too would just compete with
+// that. Reuses existing theme tokens rather than introducing new hues, same
+// reasoning as the rest of this app's palette. Unset priority (null) is kept
+// visually distinct from "low" - it means the task predates the app always
+// asking for priority, not that the user deliberately chose low.
+function priorityAccent(priority: Priority | null): { text: string; soft: string } {
+  if (priority === "high") return { text: colors.danger, soft: colors.dangerSoft };
+  if (priority === "normal") return { text: colors.warning, soft: colors.warningSoft };
+  if (priority === "low") return { text: colors.success, soft: colors.successSoft };
+  return { text: colors.textSecondary, soft: colors.surfaceAlt };
+}
+
+interface PriorityTier {
+  key: string;
+  label: string;
+  priority: Priority | null;
+  items: TaskRow[];
+}
+
+// Splits "When you have time" into high/normal/low/unset tiers, in that
+// fixed display order, dropping any tier with nothing in it. "Unset" (a task
+// created before Aidha always asked for priority) sorts last, after "low" -
+// it's not the same as a deliberate low-priority choice.
+function groupFlexibleByPriority(flexibleList: TaskRow[]): PriorityTier[] {
+  const tiers: PriorityTier[] = [
+    { key: "high", label: "High", priority: "high", items: [] },
+    { key: "normal", label: "Medium", priority: "normal", items: [] },
+    { key: "low", label: "Low", priority: "low", items: [] },
+    { key: "none", label: "No priority set", priority: null, items: [] },
+  ];
+  const byPriority = new Map(tiers.map((tier) => [tier.priority, tier]));
+  for (const task of flexibleList) {
+    byPriority.get(task.priority)!.items.push(task);
+  }
+  return tiers.filter((tier) => tier.items.length > 0);
+}
+
 function rowIcon(kind: SectionKind, task: TaskRow): keyof typeof Ionicons.glyphMap {
   if (kind === "overdue") return task.recurring_frequency ? "repeat-outline" : "checkmark-outline";
   if (kind === "laterToday") return "alarm-outline";
@@ -154,7 +205,7 @@ function rowSubtitle(kind: SectionKind, task: TaskRow): string {
   if (kind === "priority") return "High priority · no time set";
   // A flexible task can still carry a computed nudge date (e.g. "book a bus"
   // 2 days ahead of the trip) - say so rather than claiming there's none.
-  if (kind === "flexible") return task.datetime ? `Reminder ${formatShortDate(task.datetime)}` : "No deadline";
+  if (kind === "flexible") return task.datetime ? `Reminder ${formatShortDate(task.datetime)}` : "Set a reminder?";
   return "";
 }
 
@@ -172,11 +223,14 @@ export default function TodayScreen({ navigation }: Props) {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  // "list" is the grouped to-do view; "day" is a 24-hour calendar grid.
+  const [viewMode, setViewMode] = useState<"list" | "day">("list");
 
   const now = useMemo(() => new Date(), [allTasks]);
   const groups = useMemo(() => buildTodayGroups(allTasks, now), [allTasks, now]);
+  const flexibleTiers = useMemo(() => groupFlexibleByPriority(groups.flexibleList), [groups.flexibleList]);
 
-  async function loadTasks() {
+  async function loadTasks(): Promise<TaskRow[]> {
     setError(null);
     const { data, error: fetchError } = await supabase
       .from("tasks")
@@ -186,11 +240,13 @@ export default function TodayScreen({ navigation }: Props) {
 
     if (fetchError) {
       setError(fetchError.message);
-      return;
+      return [];
     }
 
     const active = await archivePastEvents((data ?? []) as TaskRow[]);
-    setAllTasks(await refreshUpcomingDepartures(active));
+    const refreshed = await refreshUpcomingDepartures(active);
+    setAllTasks(refreshed);
+    return refreshed;
   }
 
   useFocusEffect(
@@ -201,27 +257,42 @@ export default function TodayScreen({ navigation }: Props) {
     }, [])
   );
 
+  // Pull-to-refresh is an explicit "where am I right now" signal from the
+  // user, unlike the automatic recheck inside refreshUpcomingDepartures
+  // (which only recomputes a departure once the event is within
+  // DEPARTURE_RECHECK_WINDOW_MINUTES). So a manual refresh always re-anchors
+  // the "Next up" hero's departure to the user's current location, no matter
+  // how far out the event still is - other tasks are left to the automatic
+  // window-based recheck.
+  async function refreshHeroDeparture(rows: TaskRow[]) {
+    const hero = buildTodayGroups(rows, new Date()).hero;
+    if (!hero || !hero.location_raw_text || !hero.datetime) return;
+
+    const userLocation = await getCurrentUserLocation();
+    if (!userLocation) return;
+
+    const updated = await updateDepartureForTask(hero, userLocation);
+    setAllTasks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+  }
+
   async function handleRefresh() {
     setIsRefreshing(true);
-    await loadTasks();
+    const rows = await loadTasks();
+    await refreshHeroDeparture(rows);
     setIsRefreshing(false);
   }
 
   async function handleComplete(item: TaskRow) {
     setBusyId(item.id);
-    await cancelNotification(item.leaving_notification_id);
-    await cancelNotification(item.datetime_notification_id);
-    const { error: updateError } = await supabase
-      .from("tasks")
-      .update({ is_completed: true, leaving_notification_id: null, datetime_notification_id: null })
-      .eq("id", item.id);
+    const { next, error: completeError } = await completeTask(item);
     setBusyId(null);
 
-    if (updateError) {
-      setError(updateError.message);
+    if (completeError) {
+      setError(completeError);
       return;
     }
-    setAllTasks((prev) => prev.filter((t) => t.id !== item.id));
+    configureRemovalAnimation();
+    setAllTasks((prev) => [...prev.filter((t) => t.id !== item.id), ...(next ? [next] : [])]);
   }
 
   async function applySnooze(item: TaskRow, option: SnoozeOption) {
@@ -252,12 +323,12 @@ export default function TodayScreen({ navigation }: Props) {
   }
 
   function goToCalendar() {
-    // The parent tab navigator doesn't know about "My Tasks"'s nested stack
+    // The parent tab navigator doesn't know about "Tasks"'s nested stack
     // screens from here, so this cross-navigator call falls outside what its
     // types can express - same reasoning as goToCapture below, just with the
     // extra nested {screen, params} shape needed to land on a specific screen
     // inside that tab's stack rather than just the tab itself.
-    (navigation.getParent() as any)?.navigate("My Tasks", {
+    (navigation.getParent() as any)?.navigate("Tasks", {
       screen: "TaskList",
       params: { initialViewMode: "event", initialEventView: "calendar" },
     });
@@ -291,7 +362,23 @@ export default function TodayScreen({ navigation }: Props) {
         </View>
       </View>
 
-      {isLoading ? (
+      <View style={styles.modeToggle}>
+        {(["list", "day"] as const).map((mode) => (
+          <Pressable
+            key={mode}
+            onPress={() => setViewMode(mode)}
+            style={[styles.modeOption, viewMode === mode && styles.modeOptionActive]}
+          >
+            <Text style={[styles.modeOptionText, viewMode === mode && styles.modeOptionTextActive]}>
+              {mode === "list" ? "List" : "Day"}
+            </Text>
+          </Pressable>
+        ))}
+      </View>
+
+      {viewMode === "day" ? (
+        <DayView onOpenTask={openTask} />
+      ) : isLoading ? (
         <View style={styles.centered}>
           <ActivityIndicator color={colors.accent} />
         </View>
@@ -381,20 +468,42 @@ export default function TodayScreen({ navigation }: Props) {
               )}
 
               {groups.flexibleList.length > 0 && (
-                <Section kind="flexible" label="When you have time">
-                  {groups.flexibleList.map((item, index) => (
-                    <TaskRowItem
-                      key={item.id}
-                      kind="flexible"
-                      task={item}
-                      busy={busyId === item.id}
-                      isLast={index === groups.flexibleList.length - 1}
-                      onOpen={() => openTask(item)}
-                      onComplete={() => handleComplete(item)}
-                      onSnooze={() => handleSnoozePress(item)}
-                    />
-                  ))}
-                </Section>
+                <View style={styles.section}>
+                  <View style={styles.sectionHeaderRow}>
+                    <View style={[styles.sectionDot, { backgroundColor: sectionAccent("flexible").text }]} />
+                    <Text style={[styles.sectionLabel, { color: sectionAccent("flexible").text }]}>
+                      When you have time
+                    </Text>
+                  </View>
+                  <View style={styles.groupCard}>
+                    {flexibleTiers.map((tier, tierIndex) => (
+                      <View key={tier.key}>
+                        <View
+                          style={[
+                            styles.priorityTierHeader,
+                            tierIndex > 0 && styles.priorityTierHeaderDivider,
+                          ]}
+                        >
+                          <Text style={[styles.priorityTierHeaderText, { color: priorityAccent(tier.priority).text }]}>
+                            {tier.label}
+                          </Text>
+                        </View>
+                        {tier.items.map((item, index) => (
+                          <TaskRowItem
+                            key={item.id}
+                            kind="flexible"
+                            task={item}
+                            busy={busyId === item.id}
+                            isLast={index === tier.items.length - 1}
+                            onOpen={() => openTask(item)}
+                            onComplete={() => handleComplete(item)}
+                            onSnooze={() => handleSnoozePress(item)}
+                          />
+                        ))}
+                      </View>
+                    ))}
+                  </View>
+                </View>
               )}
             </>
           )}
@@ -428,14 +537,22 @@ function HeroCard({
           text: `Leave ${formatRelative(new Date(task.leaving_by!), now)}`,
           suffix: ` · ${formatTime(task.leaving_by)}`,
         }
+      : reason === "now"
+        ? {
+            icon: "play-circle-outline" as const,
+            text: "Happening now",
+            suffix: ` · until ${formatTime(eventEnd(task)!.toISOString())}`,
+          }
       : reason === "upcoming"
         ? { icon: "time-outline" as const, text: formatRelative(new Date(task.datetime!), now), suffix: "" }
         : reason === "overdue"
           ? { icon: "alert-circle-outline" as const, text: `Was due ${formatShortDate(task.datetime!)}`, suffix: "" }
           : { icon: "flag-outline" as const, text: "High priority", suffix: " · no time set" };
 
+  const { animatedStyle, playComplete } = useCompleteAnimation();
+
   return (
-    <View style={styles.heroCard}>
+    <Animated.View style={[styles.heroCard, animatedStyle]}>
       <View style={styles.heroBar}>
         <View style={styles.heroBarLeft}>
           <Ionicons name="sparkles-outline" size={13} color={colors.onSurfaceInverse} />
@@ -444,7 +561,12 @@ function HeroCard({
         {/* Events archive themselves once their time passes (see loadTasks) - */}
         {/* only a task gets a manual complete tap here. */}
         {task.type === "task" && (
-          <Pressable onPress={onComplete} disabled={busy} hitSlop={8} style={styles.heroCheck}>
+          <Pressable
+            onPress={() => playComplete(onComplete)}
+            disabled={busy}
+            hitSlop={8}
+            style={styles.heroCheck}
+          >
             {busy ? (
               <ActivityIndicator size="small" color={colors.onSurfaceInverse} />
             ) : (
@@ -472,7 +594,12 @@ function HeroCard({
         {task.datetime && (
           <View style={styles.heroRow}>
             <Ionicons name="time-outline" size={14} color={colors.accent} />
-            <Text style={styles.heroRowText}>{formatTime(task.datetime)}</Text>
+            <Text style={styles.heroRowText}>
+              {formatTime(task.datetime)}
+              {task.type === "event" && task.duration_minutes
+                ? ` - ${formatTime(eventEnd(task)!.toISOString())}`
+                : ""}
+            </Text>
           </View>
         )}
 
@@ -492,7 +619,7 @@ function HeroCard({
           )}
         </Pressable>
       </Pressable>
-    </View>
+    </Animated.View>
   );
 }
 
@@ -526,9 +653,12 @@ function TaskRowItem({
   onComplete: () => void;
   onSnooze: () => void;
 }) {
-  const accent = sectionAccent(kind);
+  // "flexible" rows are colored by priority (checkmark + title); every other
+  // section keeps its own fixed section color, as before.
+  const accent = kind === "flexible" ? priorityAccent(task.priority) : sectionAccent(kind);
   const subtitle = rowSubtitle(kind, task);
   const pillText = rowPillText(kind, task);
+  const { animatedStyle, playComplete } = useCompleteAnimation();
 
   // Events archive themselves once their time passes (see loadTasks) - the
   // avatar stays as a plain icon for them instead of a complete-tap target.
@@ -539,16 +669,20 @@ function TaskRowItem({
   );
 
   return (
-    <View style={[styles.row, !isLast && styles.rowDivider]}>
+    <Animated.View style={[styles.row, !isLast && styles.rowDivider, animatedStyle]}>
       {task.type === "task" ? (
-        <Pressable onPress={onComplete} disabled={busy} style={[styles.rowAvatar, { backgroundColor: accent.soft }]}>
+        <Pressable
+          onPress={() => playComplete(onComplete)}
+          disabled={busy}
+          style={[styles.rowAvatar, { backgroundColor: accent.soft }]}
+        >
           {avatarIcon}
         </Pressable>
       ) : (
         <View style={[styles.rowAvatar, { backgroundColor: accent.soft }]}>{avatarIcon}</View>
       )}
       <Pressable style={styles.rowMain} onPress={onOpen}>
-        <Text style={styles.rowTitle} numberOfLines={1}>
+        <Text style={[styles.rowTitle, kind === "flexible" && { color: accent.text }]} numberOfLines={1}>
           {task.title}
         </Text>
         {subtitle.length > 0 && (
@@ -562,7 +696,7 @@ function TaskRowItem({
           <Text style={[styles.rowPillText, { color: accent.text }]}>{pillText}</Text>
         </Pressable>
       )}
-    </View>
+    </Animated.View>
   );
 }
 
@@ -595,6 +729,33 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 16,
+  },
+  // Segmented List | Day switch under the top bar.
+  modeToggle: {
+    flexDirection: "row",
+    alignSelf: "center",
+    backgroundColor: colors.surfaceAlt,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 16,
+    padding: 3,
+    marginBottom: 8,
+  },
+  modeOption: {
+    paddingVertical: 6,
+    paddingHorizontal: 22,
+    borderRadius: 13,
+  },
+  modeOptionActive: {
+    backgroundColor: colors.accent,
+  },
+  modeOptionText: {
+    fontSize: 13,
+    fontWeight: "600",
+    color: colors.textSecondary,
+  },
+  modeOptionTextActive: {
+    color: colors.onSurfaceInverse,
   },
   avatar: {
     width: 34,
@@ -762,6 +923,21 @@ const styles = StyleSheet.create({
   rowDivider: {
     borderBottomWidth: 1,
     borderBottomColor: colors.border,
+  },
+  priorityTierHeader: {
+    paddingHorizontal: 12,
+    paddingTop: 10,
+    paddingBottom: 4,
+  },
+  priorityTierHeaderDivider: {
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+  },
+  priorityTierHeaderText: {
+    fontSize: 11,
+    fontWeight: "700",
+    textTransform: "uppercase",
+    letterSpacing: 0.4,
   },
   rowAvatar: {
     width: 34,

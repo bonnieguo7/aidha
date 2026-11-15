@@ -1,5 +1,7 @@
 import { z } from "https://esm.sh/zod@3.23.8";
 import { corsHeaders } from "../_shared/cors.ts";
+import { resolveDurationMinutes } from "../_shared/duration.ts";
+import { resolveTopic, sanitizeSuggestions } from "../_shared/suggestions.ts";
 
 const ANTHROPIC_API_KEY = Deno.env.get("ANTHROPIC_API_KEY");
 const ANTHROPIC_MODEL = "claude-haiku-4-5-20251001";
@@ -81,24 +83,46 @@ const EXTRACT_TASK_TOOL = {
         description:
           "Only set alongside booking_travel_datetime, never on its own. How many days before that date the reminder should fire - default to 2 unless the user asked for a different amount of lead time. Null whenever booking_travel_datetime is null.",
       },
+      duration_minutes: {
+        type: ["integer", "null"],
+        description:
+          "Events only. How long the event lasts, in minutes, but ONLY when the user stated a length ('a 2 hour dinner' -> 120, 'a 45 minute class' -> 45). Null when they gave no length, and always null for a 'task'. Never guess a typical length.",
+      },
+      end_datetime: {
+        type: ["string", "null"],
+        description:
+          "Events only. When the event ends, as local wall-clock 'YYYY-MM-DDTHH:mm:ss', but ONLY when the user gave an end time or a range ('5 to 6:30', 'until 8'). Do NOT work out a length from it - the app subtracts the start itself. Null when no end time was given, and always null for a 'task'. Leave duration_minutes null when you use this.",
+      },
     },
     required: ["type", "title", "date_certainty", "requires_downtime", "needs_clarification"],
   },
 };
 
-const ASK_PRIORITY_TOOL = {
-  name: "ask_priority",
+const ASK_QUESTION_TOOL = {
+  name: "ask_question",
   description:
-    "Ask the user to pick a priority level for a task with no deadline. Shows tappable Low/Normal/High buttons in the app instead of a free-text question - call this instead of asking about priority in plain text.",
+    "Ask the user ONE question, with optional tappable suggested replies shown as buttons above the text box. The user can always type a different answer instead of tapping one. Use this for every question you ask - never ask in plain text.",
   input_schema: {
     type: "object",
     properties: {
       question: {
         type: "string",
-        description: "Short question shown above the choice buttons, e.g. 'How high priority is this?'",
+        description: "The one short question, e.g. 'What time do you need to be reminded?'",
+      },
+      topic: {
+        type: "string",
+        enum: ["time", "location", "recurrence", "priority", "other"],
+        description:
+          "What the question is asking for: 'time' for a date/time or deadline, 'location' for ANY question about where something is or where the user needs to be - including where to catch a bus/train/flight, where to meet someone, or which branch, 'recurrence' for how often it repeats, 'priority' for how important it is, otherwise 'other'. For 'location' the app fills in the user's own previously used places as buttons, so leave suggested_replies empty.",
+      },
+      suggested_replies: {
+        type: "array",
+        items: { type: "string" },
+        description:
+          "0 to 4 short, likely answers (under 25 characters each), each written as the user would say it and complete enough to answer the question on its own. Leave empty when there are no genuinely likely answers.",
       },
     },
-    required: ["question"],
+    required: ["question", "topic"],
   },
 };
 
@@ -110,12 +134,12 @@ Current local date/time: ${currentLocalDatetime} (timezone: ${userTimezone})
 The value above is already the user's local wall-clock time, not UTC. Do all
 date/time reasoning in this same local frame - never convert to UTC.
 
-You have two tools: extract_task and ask_priority. Call extract_task only once
-you have enough information to set a useful reminder. Until then, reply with
-plain text asking exactly ONE short, specific question about the single most
-important missing piece of information - do not call extract_task yet. The
-one exception is asking about priority specifically - use the ask_priority
-tool for that instead of plain text (see the dedicated rule below).
+You have two tools: extract_task and ask_question. Call extract_task only once
+you have enough information to set a useful reminder. Until then, call
+ask_question with exactly ONE short, specific question about the single most
+important missing piece of information - do not call extract_task yet. Always
+ask through ask_question rather than replying in plain text, so the app can
+show tappable suggested replies (see the dedicated rule below).
 
 Rules:
 - Ask about a field only if it materially changes what reminder gets set: a
@@ -167,26 +191,59 @@ Rules:
   "wall street" from the answer), location.place_type: "known_place". NOT
   raw_text: "wall street location" or "Wall Street" alone - either of those
   would point at the financial district, not the gym.
-- Priority: do not infer it from wording or leave it a guess. For a "task"
-  that ends up with NO deadline at all (date_certainty "none" - you'll know
-  this once you've finished resolving date/time, including confirming the
-  user really gave no date/urgency language), call the ask_priority tool
-  (with a short question like "How high priority is this?") instead of
-  asking in plain text - do not call extract_task yet when you do this. The
-  app shows Low/Normal/High buttons and sends back whichever one the user
-  taps as a plain reply, which you then read like any other answer and map
-  to priority: "low"/"normal"/"high". Skip calling ask_priority only if the
+- Priority: do not infer it from wording or leave it a guess. For every
+  "task" (regardless of whether it ends up with a deadline, a vague
+  "approximate" urgency, or no date at all), call ask_question with the
+  question "How high priority is this?" and suggested_replies exactly
+  ["Low", "Normal", "High"], once you've finished resolving date/time and
+  location for it - do not call extract_task yet when you do this. The app
+  shows those as buttons and sends back whichever one the user taps (or
+  types instead) as a plain reply, which you then read like any other answer and map to
+  priority: "low"/"normal"/"high". Skip asking about priority only if the
   user already stated a priority unprompted earlier in the conversation. Do
-  NOT call it for a task that has a deadline, or for an "event" - the
-  deadline (or the event's fixed time) already conveys how time-sensitive it
-  is. Worked example - user: "I need to clean out my garage" -> no date/time
-  or urgency language at all, so date_certainty resolves to "none" -> call
-  ask_priority with question "How high priority is this?" -> the app replies
-  with the user's tapped choice, e.g. "Low" -> priority: "low" -> now call
-  extract_task.
+  NOT call it for an "event" - the event's fixed time already conveys how
+  time-sensitive it is, and events don't carry a priority field. Worked
+  example (no deadline) - user: "I need to clean out my garage" -> no
+  date/time or urgency language at all, so date_certainty resolves to "none"
+  -> call ask_question "How high priority is this?" with the Low/Normal/High replies -> the app
+  replies with the user's tapped choice, e.g. "Low" -> priority: "low" -> now
+  call extract_task. Worked example (has a deadline) - user: "Pay the water
+  bill by Friday" -> date/time resolves to Friday, no location needed -> call
+  ask_question "How high priority is this?" with the Low/Normal/High
+  replies -> app replies "High" -> priority: "high" -> now call extract_task.
 - Ask ONE question at a time, in one short sentence. You may add one brief,
   genuinely useful piece of context (e.g. suggesting arriving a few minutes
   early for a train, flight, or appointment) but do not pad the message.
+- Suggested replies: the goal is for the user to type as little as possible,
+  so when you ask a question that has a few genuinely likely answers, pass
+  them in suggested_replies as 2 to 4 short options. Each is sent back
+  verbatim as the user's reply, so write it the way the user would say it
+  ("Tomorrow at 9am", not "9am tomorrow morning option") and make it complete
+  enough to answer the question without a follow-up. Guidance by question:
+  - When to be reminded, or a deadline, for something with no fixed time:
+    offer concrete times relative to the current local time above (e.g. at
+    2:40pm: "In 1 hour", "Today at 6pm", "Tomorrow at 9am"), plus "No
+    deadline" when it's a task that could reasonably have none. Never offer
+    a vague option like "Later" or "Tomorrow morning" - the time must be
+    specific enough to resolve exactly.
+  - Recurrence: "Every day", "Every week", "Just once" as fits.
+  - A yes/no question: "Yes", "No".
+  - The exact time of something with a fixed schedule (a train, a class, an
+    appointment the user has to know the time of) and the location of
+    anything: leave suggested_replies empty - a wrong guess would only add
+    noise, and the user knows the real answer. For a location question still
+    set topic to "location": the app then offers the user's own usual places
+    as buttons by itself, so never invent place names yourself.
+  - A date or time the user simply has to know as a fact (when a birthday,
+    trip, flight or appointment is): leave suggested_replies empty. Only
+    offer time chips when the question is about when THEY want to be
+    reminded or when THEIR deadline is - a choice, not a fact.
+  Every option must be a finished answer. Never offer an option that just
+  asks for more detail ("By a specific date", "Pick a time", "Other",
+  "Custom") - the text box already covers that. And never offer a vague
+  window like "This weekend" or "Next week": name a specific day and time
+  ("Saturday at 10am", "Monday at 9am") or leave it out.
+  Never pad the list with options you wouldn't expect the user to pick.
 - Your questions are shown as plain text, not markdown - never use
   formatting like **bold**, _italics_, or bullet lists.
 - "ASAP" / "as soon as possible" -> date_certainty: "approximate", datetime:
@@ -211,15 +268,24 @@ Rules:
   fixed-moment alert, so it should surface as flexible rather than tied to an
   exact time. Worked example - user: "I need to book a bus to Boston" -> you
   ask "What date and time do you need to travel?" -> user: "Next Thursday at
-  6pm", which resolves to 2026-08-27T18:00:00 -> you call extract_task with:
-  title "Book bus to Boston (leaves Aug 27)", datetime null,
-  booking_travel_datetime "2026-08-27T18:00:00", booking_lead_days 2,
-  date_certainty "exact", requires_downtime true, confirmation_note "Great,
-  I'll remind you a couple of days early to book your bus to Boston." When
-  asking a clarifying question about the date for this kind of task, ask for
-  the trip/event date directly ("What date are you traveling?"), not a vague
+  6pm", which resolves to 2026-08-27T18:00:00 -> per the priority rule above,
+  call ask_question "How high priority is this?" with the Low/Normal/High
+  replies -> app replies "Normal" -> now call extract_task with: title "Book bus to Boston (leaves
+  Aug 27)", datetime null, booking_travel_datetime "2026-08-27T18:00:00",
+  booking_lead_days 2, date_certainty "exact", requires_downtime true,
+  priority "normal", confirmation_note "Great, I'll remind you a couple of
+  days early to book your bus to Boston." When asking a clarifying question
+  about the date for this kind of task, ask for the trip/event date directly
+  ("What date are you traveling?"), not a vague
   "what date do you need it for" - this reasoning depends on knowing that's
   the trip date, not a self-imposed deadline.
+- Duration (events only): if the user says how long an event lasts ("a 2
+  hour dinner", "my 45 minute class"), set duration_minutes to that length in
+  minutes. If they instead give an end time or a range ("5 to 6:30pm", "until
+  8"), set end_datetime to that end (same local format as datetime) and leave
+  duration_minutes null - the app does the subtraction. If they gave neither,
+  leave both null: never guess a typical length, and never ask about it.
+  Tasks never have a duration.
 - When you set datetime, format it as 'YYYY-MM-DDTHH:mm:ss' in local wall-clock
   time - the exact hour/minute the user means in their own timezone. Never
   append 'Z' or a UTC offset, and never shift the hour to compensate for a
@@ -248,6 +314,12 @@ const requestSchema = z.object({
   messages: z.array(messageSchema).min(1, "messages must not be empty"),
   current_datetime: z.string().min(1, "current_datetime is required"),
   timezone: z.string().min(1, "timezone is required"),
+});
+
+const askQuestionInputSchema = z.object({
+  question: z.string().trim().min(1),
+  topic: z.enum(["time", "location", "recurrence", "priority", "other"]).catch("other"),
+  suggested_replies: z.array(z.unknown()).optional(),
 });
 
 const parsedTaskSchema = z.object({
@@ -302,6 +374,17 @@ const parsedTaskSchema = z.object({
     .nullable()
     .optional()
     .transform((v) => v ?? null),
+  duration_minutes: z
+    .number()
+    .nullable()
+    .optional()
+    .transform((v) => v ?? null),
+  end_datetime: z
+    .string()
+    .nullable()
+    .optional()
+    .transform((v) => v ?? null)
+    .transform((v) => (v ? v.replace(/(Z|[+-]\d{2}:?\d{2})$/, "") : v)),
 });
 
 // Local wall-clock "YYYY-MM-DDTHH:mm:ss" arithmetic, kept out of the model's
@@ -393,7 +476,7 @@ Deno.serve(async (req) => {
         max_tokens: 1024,
         system: buildSystemPrompt(current_datetime, timezone),
         messages: messages.map((m) => ({ role: m.role, content: m.content })),
-        tools: [EXTRACT_TASK_TOOL, ASK_PRIORITY_TOOL],
+        tools: [EXTRACT_TASK_TOOL, ASK_QUESTION_TOOL],
         tool_choice: mustFinalize ? { type: "tool", name: "extract_task" } : { type: "auto" },
       }),
     });
@@ -408,13 +491,22 @@ Deno.serve(async (req) => {
 
   const anthropicData = await anthropicResponse.json();
 
-  const priorityToolUse = anthropicData.content?.find(
-    (block: { type: string; name?: string }) => block.type === "tool_use" && block.name === "ask_priority"
+  const askQuestionBlock = anthropicData.content?.find(
+    (block: { type: string; name?: string }) => block.type === "tool_use" && block.name === "ask_question"
   );
-  if (priorityToolUse) {
-    const validated = z.object({ question: z.string() }).safeParse(priorityToolUse.input);
-    const question = validated.success ? validated.data.question : "How high priority is this?";
-    return jsonResponse({ type: "choice", question, field: "priority", options: ["low", "normal", "high"] }, 200);
+  if (askQuestionBlock) {
+    const validated = askQuestionInputSchema.safeParse(askQuestionBlock.input);
+    if (validated.success) {
+      return jsonResponse(
+        {
+          type: "question",
+          question: validated.data.question,
+          topic: resolveTopic(validated.data.question, validated.data.topic),
+          suggestions: sanitizeSuggestions(validated.data.suggested_replies),
+        },
+        200
+      );
+    }
   }
 
   const toolUseBlock = anthropicData.content?.find(
@@ -430,11 +522,11 @@ Deno.serve(async (req) => {
       );
     }
 
-    // booking_travel_datetime/booking_lead_days are internal-only - the model
+    // booking_travel_datetime/booking_lead_days (and end_datetime, below) are internal-only - the model
     // resolves the travel date, but the actual "N days before" subtraction
     // happens here in code rather than being trusted to the model's own
     // arithmetic. Never expose these two fields to the client.
-    const { booking_travel_datetime, booking_lead_days, ...rest } = validated.data;
+    const { booking_travel_datetime, booking_lead_days, duration_minutes, end_datetime, ...rest } = validated.data;
     let datetime = rest.datetime;
 
     if (booking_travel_datetime) {
@@ -449,7 +541,12 @@ Deno.serve(async (req) => {
       datetime = computedDate && now && computedDate.getTime() > now.getTime() ? computed : booking_travel_datetime;
     }
 
-    return jsonResponse({ type: "result", data: { ...rest, datetime } }, 200);
+    // Same reasoning for duration: the model reports a stated length or end
+    // time, and the minutes are worked out here. Tasks never carry one.
+    const duration =
+      rest.type === "event" ? resolveDurationMinutes(duration_minutes, datetime, end_datetime) : null;
+
+    return jsonResponse({ type: "result", data: { ...rest, datetime, duration_minutes: duration } }, 200);
   }
 
   const textBlock = anthropicData.content?.find(
@@ -460,5 +557,7 @@ Deno.serve(async (req) => {
     return jsonResponse({ error: "Model did not return a question or a structured result." }, 502);
   }
 
-  return jsonResponse({ type: "question", question: textBlock.text.trim() }, 200);
+  // The model answered in plain text instead of calling ask_question - still a
+  // usable question, just without suggestions.
+  return jsonResponse({ type: "question", question: textBlock.text.trim(), topic: resolveTopic(textBlock.text, "other"), suggestions: [] }, 200);
 });

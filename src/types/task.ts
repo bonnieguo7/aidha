@@ -23,6 +23,9 @@ export interface ParsedTask {
   requires_downtime: boolean;
   needs_clarification: ClarificationField[];
   confirmation_note: string | null;
+  // Events only: how long it lasts, when the user said ("2 hour dinner",
+  // "5 to 6:30"). Null = unknown, which the Day view draws as an hour.
+  duration_minutes: number | null;
 }
 
 // One turn in the parse-task conversation, sent to and echoed back by the Edge Function.
@@ -31,12 +34,18 @@ export interface ConversationTurn {
   content: string;
 }
 
-// Shape returned by the parse-task Edge Function: a follow-up question (plain
-// text reply expected), a multiple-choice question (tap one of `options`
-// instead of typing - currently only used for priority), or the final result.
+// What a follow-up question is asking for. "location" is the one the app acts
+// on itself: it offers the user's own previously used places as answers rather
+// than anything the model could make up.
+export type QuestionTopic = "time" | "location" | "recurrence" | "priority" | "other";
+
+// Shape returned by the parse-task Edge Function: a follow-up question, or the
+// final result. A question may carry `suggestions` - short likely answers shown
+// as tappable buttons above the text box (the user can still type instead);
+// absent or empty when there's nothing worth suggesting. `topic` is absent from
+// older deployments of the function.
 export type ParseTaskResponse =
-  | { type: "question"; question: string }
-  | { type: "choice"; question: string; field: "priority"; options: Priority[] }
+  | { type: "question"; question: string; topic?: QuestionTopic; suggestions?: string[] }
   | { type: "result"; data: ParsedTask };
 
 // Partial update returned by the edit-task Edge Function (mirrors the update_task tool
@@ -51,6 +60,7 @@ export interface TaskPatch {
   recurring?: { frequency: RecurringFrequency; interval_detail: string } | null;
   priority?: Priority | null;
   requires_downtime?: boolean;
+  duration_minutes?: number | null;
 }
 
 // Shape returned by the edit-task Edge Function: either a follow-up question or a patch to apply.
@@ -73,6 +83,8 @@ export interface TaskRow {
   recurring_detail: string | null;
   priority: Priority | null;
   requires_downtime: boolean;
+  // Events only; null = no duration set (see ParsedTask.duration_minutes).
+  duration_minutes: number | null;
   is_completed: boolean;
   latitude: number | null;
   longitude: number | null;

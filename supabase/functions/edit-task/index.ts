@@ -1,5 +1,6 @@
 import { z } from "https://esm.sh/zod@3.23.8";
 import { corsHeaders } from "../_shared/cors.ts";
+import { resolveDurationMinutes } from "../_shared/duration.ts";
 
 const ANTHROPIC_API_KEY = Deno.env.get("ANTHROPIC_API_KEY");
 const ANTHROPIC_MODEL = "claude-haiku-4-5-20251001";
@@ -42,6 +43,16 @@ const UPDATE_TASK_TOOL = {
       },
       priority: { type: ["string", "null"], enum: ["high", "normal", "low", null] },
       requires_downtime: { type: "boolean" },
+      duration_minutes: {
+        type: ["integer", "null"],
+        description:
+          "Events only. How long the event lasts, in minutes, when the user states a length ('make it 2 hours' -> 120). Null to clear the duration.",
+      },
+      end_datetime: {
+        type: ["string", "null"],
+        description:
+          "Events only. When the event should end, as local wall-clock 'YYYY-MM-DDTHH:mm:ss', when the user gives an end time ('end at 9pm') instead of a length. Do NOT work out the length yourself - the app subtracts the start. Leave duration_minutes out when you use this.",
+      },
     },
     required: [],
   },
@@ -110,6 +121,10 @@ Rules:
   location name - change only that reference, keep the rest of the title's
   wording as-is. If the title doesn't mention the old location by name,
   leave the title out of the tool call entirely.
+- Duration (events only): "make it 2 hours" -> duration_minutes 120. "End at
+  9pm" or "until 9" -> end_datetime on the event's date, leaving
+  duration_minutes out (the app works out the length). "Remove the duration"
+  -> duration_minutes null. Never set either for a "task".
 - When you set datetime, format it as 'YYYY-MM-DDTHH:mm:ss' in local
   wall-clock time - the exact hour/minute the user means. Never append 'Z' or
   a UTC offset, and never shift the hour to compensate for a timezone.
@@ -150,6 +165,7 @@ const taskContextSchema = z.object({
     .nullable(),
   priority: z.enum(["high", "normal", "low"]).nullable(),
   requires_downtime: z.boolean(),
+  duration_minutes: z.number().nullable().optional(),
 });
 
 const requestSchema = z.object({
@@ -190,6 +206,8 @@ const updateTaskSchema = z.object({
     .optional(),
   priority: z.enum(["high", "normal", "low"]).nullable().optional(),
   requires_downtime: z.boolean().optional(),
+  duration_minutes: z.number().nullable().optional(),
+  end_datetime: z.string().nullable().optional().transform(stripTzSuffix),
 });
 
 function jsonResponse(body: unknown, status: number) {
@@ -285,7 +303,25 @@ Deno.serve(async (req) => {
         502
       );
     }
-    return jsonResponse({ type: "result", data: validated.data }, 200);
+
+    // Lengths are resolved here, not by the model: an end time becomes minutes
+    // by subtracting the (possibly just-edited) start, and anything outside
+    // 5 minutes to 24 hours is dropped rather than saved.
+    const { end_datetime, ...patch } = validated.data;
+    const start = patch.datetime !== undefined ? patch.datetime : task.datetime;
+    if (end_datetime) {
+      const minutes = resolveDurationMinutes(null, start, end_datetime);
+      if (minutes !== null) patch.duration_minutes = minutes;
+      else delete patch.duration_minutes;
+    } else if (typeof patch.duration_minutes === "number") {
+      const minutes = resolveDurationMinutes(patch.duration_minutes, null, null);
+      if (minutes !== null) patch.duration_minutes = minutes;
+      else delete patch.duration_minutes;
+    }
+    // Only events have a duration - never write one onto a task.
+    if ((patch.type ?? task.type) !== "event") delete patch.duration_minutes;
+
+    return jsonResponse({ type: "result", data: patch }, 200);
   }
 
   const textBlock = anthropicData.content?.find(

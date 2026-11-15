@@ -1,5 +1,7 @@
 import { Ionicons } from "@expo/vector-icons";
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
+import { useState } from "react";
+import { ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { DURATION_PRESETS, formatDuration, parseDurationInput } from "../lib/duration";
 import { colors } from "../lib/theme";
 
 // Shared field-row/segmented-control UI, originally built for EditTaskScreen's
@@ -31,6 +33,61 @@ export function SegmentedControl<T extends string>({
           </Pressable>
         );
       })}
+    </View>
+  );
+}
+
+const PRESET_MINUTES: readonly number[] = DURATION_PRESETS;
+
+// One-tap lengths plus a free-typed number of minutes for anything else. Calls
+// onChange(null) for "None" (no duration), a whole number of minutes otherwise;
+// a half-typed or out-of-range custom value leaves the last valid choice alone.
+export function DurationPicker({
+  value,
+  onChange,
+}: {
+  value: number | null;
+  onChange: (minutes: number | null) => void;
+}) {
+  const isPreset = value !== null && PRESET_MINUTES.includes(value);
+  const [customText, setCustomText] = useState(value !== null && !isPreset ? String(value) : "");
+  const customInvalid = customText.trim() !== "" && parseDurationInput(customText) === null;
+
+  const options = [
+    { label: "None", value: "none" },
+    ...DURATION_PRESETS.map((minutes) => ({ label: formatDuration(minutes), value: String(minutes) })),
+  ];
+  // A custom length matches no chip, so none is highlighted.
+  const selected = value === null ? "none" : isPreset ? String(value) : "";
+
+  return (
+    <View>
+      <SegmentedControl
+        options={options}
+        value={selected}
+        onChange={(choice) => {
+          setCustomText("");
+          onChange(choice === "none" ? null : Number(choice));
+        }}
+      />
+      <TextInput
+        style={[fieldEditorStyles.inlineInput, fieldEditorStyles.recurrenceDetailInput]}
+        value={customText}
+        onChangeText={(text) => {
+          setCustomText(text);
+          const minutes = parseDurationInput(text);
+          if (minutes !== null) onChange(minutes);
+        }}
+        // Leaving the field with something unusable in it snaps back to the
+        // last valid choice, so what's shown is what Save will store.
+        onBlur={() => {
+          if (customInvalid) setCustomText(value !== null && !isPreset ? String(value) : "");
+        }}
+        placeholder="Or type minutes (5-1440)"
+        placeholderTextColor={colors.textMuted}
+        keyboardType="number-pad"
+      />
+      {customInvalid && <Text style={fieldEditorStyles.durationHint}>Enter a whole number from 5 to 1440.</Text>}
     </View>
   );
 }
@@ -221,5 +278,10 @@ export const fieldEditorStyles = StyleSheet.create({
   },
   buttonDisabled: {
     opacity: 0.5,
+  },
+  durationHint: {
+    marginTop: 6,
+    fontSize: 12,
+    color: colors.danger,
   },
 });

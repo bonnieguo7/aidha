@@ -13,6 +13,7 @@ import {
   View,
 } from "react-native";
 import { confirmDelete } from "../lib/confirmDelete";
+import { formatDuration } from "../lib/duration";
 import { isoToLocalNaive, localIsoNow, localNaiveToUtcIso } from "../lib/localDatetime";
 import { getCurrentUserLocation } from "../lib/locationPermission";
 import { openInMaps } from "../lib/maps";
@@ -22,6 +23,7 @@ import { supabase } from "../lib/supabase";
 import { syncDueNotification } from "../lib/syncDueNotification";
 import { colors } from "../lib/theme";
 import DatePickerField from "../components/DatePickerField";
+import { DurationPicker } from "../components/FieldEditorUI";
 import TimePickerField from "../components/TimePickerField";
 import type { TasksStackParamList } from "../navigation/types";
 import type {
@@ -41,6 +43,17 @@ const NO_PRIORITY = "none" as const;
 
 function pad(n: number): string {
   return n.toString().padStart(2, "0");
+}
+
+// Matches DatePickerField's own fallback when it's given an empty value (it
+// visually pre-highlights today on the calendar even though nothing's been
+// tapped yet) - without this, opening "Add a reminder" on a task with no
+// existing date left dateDraft as "" while the picker showed today already
+// selected, so tapping Save without first tapping a day failed with "Enter a
+// date for the reminder" - confusing since a date visually looked chosen.
+function todayIso(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
 function isoToDateParts(iso: string | null): { date: string; time: string } {
@@ -256,6 +269,7 @@ export default function EditTaskScreen({ route, navigation }: Props) {
   const [locationDraft, setLocationDraft] = useState(taskData.location_raw_text ?? "");
   const [dateDraft, setDateDraft] = useState(dateParts.date);
   const [timeDraft, setTimeDraft] = useState(dateParts.time);
+  const [durationDraft, setDurationDraft] = useState<number | null>(taskData.duration_minutes);
   const [typeDraft, setTypeDraft] = useState<TaskType>(taskData.type);
   const [priorityDraft, setPriorityDraft] = useState<Priority | typeof NO_PRIORITY>(
     taskData.priority ?? NO_PRIORITY
@@ -328,11 +342,14 @@ export default function EditTaskScreen({ route, navigation }: Props) {
         setLocationDraft(taskData.location_raw_text ?? "");
         break;
       case "date":
-        setDateDraft(parts.date);
+        setDateDraft(parts.date || todayIso());
         setTimeDraft(parts.time);
         break;
       case "time":
         setTimeDraft(parts.time);
+        break;
+      case "duration":
+        setDurationDraft(taskData.duration_minutes);
         break;
       case "type":
         setTypeDraft(taskData.type);
@@ -518,6 +535,10 @@ export default function EditTaskScreen({ route, navigation }: Props) {
     }
   }
 
+  function handleSaveDuration() {
+    saveField("duration", { duration_minutes: durationDraft });
+  }
+
   function handleSaveType() {
     saveField("type", { type: typeDraft });
   }
@@ -567,6 +588,7 @@ export default function EditTaskScreen({ route, navigation }: Props) {
         : null,
       priority: t.priority,
       requires_downtime: t.requires_downtime,
+      duration_minutes: t.duration_minutes,
     };
   }
 
@@ -588,6 +610,7 @@ export default function EditTaskScreen({ route, navigation }: Props) {
     }
     if (patch.priority !== undefined) dbPatch.priority = patch.priority;
     if (patch.requires_downtime !== undefined) dbPatch.requires_downtime = patch.requires_downtime;
+    if (patch.duration_minutes !== undefined) dbPatch.duration_minutes = patch.duration_minutes;
 
     if (Object.keys(dbPatch).length === 0) return;
 
@@ -756,6 +779,23 @@ export default function EditTaskScreen({ route, navigation }: Props) {
                 onSave={handleSaveTime}
                 onCancel={() => closeField("time")}
                 saving={savingField === "time"}
+              />
+            </FieldRow>
+          )}
+
+          {showDateTimeRows && taskData.type === "event" && (
+            <FieldRow
+              icon="hourglass-outline"
+              label="Duration"
+              value={taskData.duration_minutes ? formatDuration(taskData.duration_minutes) : "Not set"}
+              expanded={!!expanded.duration}
+              onToggle={() => toggleField("duration")}
+            >
+              <DurationPicker value={durationDraft} onChange={setDurationDraft} />
+              <EditorActions
+                onSave={handleSaveDuration}
+                onCancel={() => closeField("duration")}
+                saving={savingField === "duration"}
               />
             </FieldRow>
           )}

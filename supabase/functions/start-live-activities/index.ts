@@ -19,11 +19,8 @@ const APNS_BUNDLE_ID = Deno.env.get("APNS_BUNDLE_ID");
 // shipped via TestFlight/App Store - see the plan's Risks section.
 const APNS_ENVIRONMENT = Deno.env.get("APNS_ENVIRONMENT") ?? "sandbox";
 
-// TEMP DEBUG - widened from 14/15 for manual testing convenience (a 1-minute
-// window is hard to hit exactly during manual invoke round-trips). Revert to
-// 14/15 once device testing confirms the push itself works.
-const RECHECK_WINDOW_START_MINUTES = 5;
-const RECHECK_WINDOW_END_MINUTES = 25;
+const RECHECK_WINDOW_START_MINUTES = 14;
+const RECHECK_WINDOW_END_MINUTES = 15;
 
 function jsonResponse(body: unknown, status: number) {
   return new Response(JSON.stringify(body), {
@@ -129,17 +126,7 @@ Deno.serve(async (req) => {
     .is("live_activity_started_at", null);
 
   if (tasksError) return jsonResponse({ error: `DB query failed: ${tasksError.message}` }, 500);
-  if (!tasks || tasks.length === 0) {
-    // TEMP DEBUG - remove once the matching bug is found.
-    const { data: allUpcoming } = await supabase
-      .from("tasks")
-      .select("id, leaving_by, is_completed, live_activity_started_at")
-      .not("leaving_by", "is", null)
-      .eq("is_completed", false)
-      .order("leaving_by", { ascending: true })
-      .limit(10);
-    return jsonResponse({ started: 0, debug: { windowStart, windowEnd, allUpcoming } }, 200);
-  }
+  if (!tasks || tasks.length === 0) return jsonResponse({ started: 0 }, 200);
 
   const userIds = [...new Set(tasks.map((t) => t.user_id))];
   const { data: tokenRows, error: tokenError } = await supabase
@@ -153,8 +140,9 @@ Deno.serve(async (req) => {
   const jwt = await buildApnsJwt();
 
   let started = 0;
-  // TEMP DEBUG - collecting failures into the response so they're visible
-  // without a working `supabase functions logs` command on this CLI version.
+  // Collected (not just console.error'd) so failures are visible in the
+  // cron job's own response even without a working `supabase functions
+  // logs` command on this CLI version.
   const failures: unknown[] = [];
   for (const task of tasks as EligibleTask[]) {
     const token = tokenByUser.get(task.user_id);
