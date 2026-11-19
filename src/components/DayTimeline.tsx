@@ -11,7 +11,7 @@ import {
   type BlockGeometry,
   type PositionedBlock,
 } from "../lib/dayLayout";
-import { eventEnd } from "../lib/duration";
+import { itemEnd } from "../lib/duration";
 import { colors } from "../lib/theme";
 import type { TaskRow } from "../types/task";
 
@@ -150,8 +150,8 @@ function BlockView({
   }
 
   const isEvent = block.kind === "event";
-  // "7:00 PM - 8:30 PM" once an event has a duration; just the start otherwise.
-  const end = isEvent && task.duration_minutes ? eventEnd(task) : null;
+  // "7:00 PM - 8:30 PM" once it has a duration; just the start otherwise.
+  const end = task.duration_minutes ? itemEnd(task) : null;
   const start = task.datetime
     ? formatTime(new Date(task.datetime)) + (end ? ` - ${formatTime(end)}` : "")
     : "";

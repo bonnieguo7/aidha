@@ -46,12 +46,12 @@ const UPDATE_TASK_TOOL = {
       duration_minutes: {
         type: ["integer", "null"],
         description:
-          "Events only. How long the event lasts, in minutes, when the user states a length ('make it 2 hours' -> 120). Null to clear the duration.",
+          "How long it lasts, in minutes, when the user states a length ('make it 2 hours' -> 120). Applies to events and tasks. Null to clear the duration.",
       },
       end_datetime: {
         type: ["string", "null"],
         description:
-          "Events only. When the event should end, as local wall-clock 'YYYY-MM-DDTHH:mm:ss', when the user gives an end time ('end at 9pm') instead of a length. Do NOT work out the length yourself - the app subtracts the start. Leave duration_minutes out when you use this.",
+          "When it should end, as local wall-clock 'YYYY-MM-DDTHH:mm:ss', when the user gives an end time ('end at 9pm') instead of a length. Applies to events and tasks. Do NOT work out the length yourself - the app subtracts the start. Leave duration_minutes out when you use this.",
       },
     },
     required: [],
@@ -121,10 +121,12 @@ Rules:
   location name - change only that reference, keep the rest of the title's
   wording as-is. If the title doesn't mention the old location by name,
   leave the title out of the tool call entirely.
-- Duration (events only): "make it 2 hours" -> duration_minutes 120. "End at
-  9pm" or "until 9" -> end_datetime on the event's date, leaving
+- Duration (events and tasks): "make it 2 hours" -> duration_minutes 120.
+  "End at 9pm" or "until 9" -> end_datetime on the item's date, leaving
   duration_minutes out (the app works out the length). "Remove the duration"
-  -> duration_minutes null. Never set either for a "task".
+  -> duration_minutes null. Changing or adding a duration never changes
+  whether the item is an event or a task - only change type if the user
+  asks for it.
 - When you set datetime, format it as 'YYYY-MM-DDTHH:mm:ss' in local
   wall-clock time - the exact hour/minute the user means. Never append 'Z' or
   a UTC offset, and never shift the hour to compensate for a timezone.
@@ -318,8 +320,6 @@ Deno.serve(async (req) => {
       if (minutes !== null) patch.duration_minutes = minutes;
       else delete patch.duration_minutes;
     }
-    // Only events have a duration - never write one onto a task.
-    if ((patch.type ?? task.type) !== "event") delete patch.duration_minutes;
 
     return jsonResponse({ type: "result", data: patch }, 200);
   }

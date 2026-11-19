@@ -1,5 +1,5 @@
 import { Ionicons } from "@expo/vector-icons";
-import { useFocusEffect } from "@react-navigation/native";
+import { useFocusEffect, useNavigation, type NavigationProp, type ParamListBase } from "@react-navigation/native";
 import { useCallback, useState } from "react";
 import {
   ActivityIndicator,
@@ -16,6 +16,8 @@ import {
 import { useAuth } from "../lib/AuthContext";
 import { localIsoNow, localNaiveToUtcIso } from "../lib/localDatetime";
 import { getCurrentUserLocation } from "../lib/locationPermission";
+import { canSaveManualTask, createBlankTask, finalizeManualTask } from "../lib/manualTask";
+import { effectivePriority } from "../lib/priority";
 import { fetchRecentLocations } from "../lib/recentLocations";
 import { updateDepartureForTask } from "../lib/scheduleDeparture";
 import { supabase } from "../lib/supabase";
@@ -25,7 +27,7 @@ import type { ConversationTurn, ParsedTask, ParseTaskResponse, TaskRow } from ".
 import TaskCard from "../components/TaskCard";
 import PendingTaskFields from "../components/PendingTaskFields";
 
-const OPENING_QUESTION = "What do you need to remember?";
+const OPENING_QUESTION = "What's on your mind?";
 const CONFIRMATION_MESSAGE = "Got it, here's what I've got:";
 
 function AssistantBubble({ children }: { children: React.ReactNode }) {
@@ -36,6 +38,9 @@ function AssistantBubble({ children }: { children: React.ReactNode }) {
 
 export default function NewTaskScreen() {
   const { session } = useAuth();
+  // This tab sits beside the Today/Tasks stacks rather than inside one, so
+  // reaching a task's detail screen is a cross-navigator call (see openSavedTask).
+  const navigation = useNavigation<NavigationProp<ParamListBase>>();
   const [messages, setMessages] = useState<ConversationTurn[]>([]);
   const [draft, setDraft] = useState("");
   const [isSending, setIsSending] = useState(false);
@@ -58,6 +63,9 @@ export default function NewTaskScreen() {
   // Whether the pending task's field editor is open beneath its card - toggled
   // by the pencil icon beside the card, independent of confirming/saving it.
   const [isEditingResult, setIsEditingResult] = useState(false);
+  // Manual mode: the user fills in the fields themselves instead of chatting.
+  const [isManual, setIsManual] = useState(false);
+  const [manualTask, setManualTask] = useState<ParsedTask>(createBlankTask);
 
   // Shared by both a typed reply and a tapped suggestion - either way, the
   // new turn already has its content decided by the caller, this just sends
@@ -109,8 +117,13 @@ export default function NewTaskScreen() {
     sendMessages(nextMessages);
   }
 
-  async function handleSave() {
-    if (!result || !session) return;
+  // Saves a finished task and sets up its reminders. Shared by the AI chat flow
+  // and the manual form, so a hand-built task gets exactly the same "at the
+  // time" and "leaving by" reminders. Returns the saved row (as it stands after
+  // the reminders were set up, so it already has its leaving-by time), or null
+  // if it couldn't be saved.
+  async function saveTask(task: ParsedTask, rawInput: string): Promise<TaskRow | null> {
+    if (!session) return null;
     setIsSaving(true);
     setError(null);
 
@@ -118,18 +131,18 @@ export default function NewTaskScreen() {
       .from("tasks")
       .insert({
         user_id: session.user.id,
-        raw_input: messages.find((m) => m.role === "user")?.content ?? "",
-        type: result.type,
-        title: result.title,
-        datetime: result.datetime ? localNaiveToUtcIso(result.datetime) : null,
-        date_certainty: result.date_certainty,
-        location_raw_text: result.location?.raw_text ?? null,
-        location_place_type: result.location?.place_type ?? null,
-        recurring_frequency: result.recurring?.frequency ?? null,
-        recurring_detail: result.recurring?.interval_detail ?? null,
-        priority: result.priority,
-        requires_downtime: result.requires_downtime,
-        duration_minutes: result.type === "event" ? result.duration_minutes : null,
+        raw_input: rawInput,
+        type: task.type,
+        title: task.title,
+        datetime: task.datetime ? localNaiveToUtcIso(task.datetime) : null,
+        date_certainty: task.date_certainty,
+        location_raw_text: task.location?.raw_text ?? null,
+        location_place_type: task.location?.place_type ?? null,
+        recurring_frequency: task.recurring?.frequency ?? null,
+        recurring_detail: task.recurring?.interval_detail ?? null,
+        priority: effectivePriority(task),
+        requires_downtime: task.requires_downtime,
+        duration_minutes: task.duration_minutes,
       })
       .select()
       .single();
@@ -137,23 +150,25 @@ export default function NewTaskScreen() {
     if (insertError) {
       setIsSaving(false);
       setError(insertError.message);
-      return;
+      return null;
     }
+
+    let saved = inserted as TaskRow;
 
     // Independent of the location-based "leaving by" reminder below - this one
     // just fires at the task/event's own time, so it applies whenever there's
     // a datetime at all, location or not.
-    if (result.datetime) {
-      await syncDueNotification(inserted as TaskRow);
+    if (task.datetime) {
+      saved = await syncDueNotification(saved);
     }
 
     // A location + time is exactly what a "leaving by" reminder needs - compute
     // and schedule it now rather than waiting for the user to open the task again.
     let departureSkipped = false;
-    if (result.location && result.datetime) {
+    if (task.location && task.datetime) {
       const userLocation = await getCurrentUserLocation();
       if (userLocation) {
-        await updateDepartureForTask(inserted as TaskRow, userLocation);
+        saved = await updateDepartureForTask(saved, userLocation);
       } else {
         // Permission denied or the device couldn't get a fix - the task still
         // saves fine, but silently skipping this without telling the user
@@ -170,22 +185,105 @@ export default function NewTaskScreen() {
         ? "Task saved. Couldn't access your location, so a \"leaving by\" reminder wasn't set up - enable location access and retry from the task's edit screen."
         : "Task saved successfully."
     );
-    setMessages([]);
-    setResult(null);
-    setDraft("");
-    setIsEditingResult(false);
+    return saved;
   }
 
-  function handleStartOver() {
+  // Opens the saved task's detail screen. It lives in the Tasks tab's stack
+  // (initial: false keeps the Tasks list underneath, so Back returns to the list
+  // with the new task in it). The reset above means coming back to this tab
+  // later starts a fresh conversation.
+  function openSavedTask(task: TaskRow) {
+    navigation.navigate("Tasks", { screen: "EditTask", params: { task }, initial: false });
+  }
+
+  function resetScreen() {
     setMessages([]);
     setResult(null);
     setDraft("");
     setError(null);
     setSuggestions([]);
     setIsEditingResult(false);
+    setIsManual(false);
+    setManualTask(createBlankTask());
+  }
+
+  async function handleSave() {
+    if (!result) return;
+    const firstMessage = messages.find((m) => m.role === "user")?.content ?? "";
+    const saved = await saveTask(result, firstMessage);
+    if (saved) {
+      resetScreen();
+      openSavedTask(saved);
+    }
+  }
+
+  async function handleSaveManual() {
+    if (!canSaveManualTask(manualTask)) return;
+    const task = finalizeManualTask(manualTask);
+    // There's no message to record as the original input, so the title stands in.
+    const saved = await saveTask(task, task.title);
+    if (saved) {
+      resetScreen();
+      openSavedTask(saved);
+    }
+  }
+
+  function handleStartOver() {
+    resetScreen();
   }
 
   const showSuggestions = suggestions.length > 0 && !isSending;
+
+  if (isManual) {
+    return (
+      <KeyboardAvoidingView
+        style={styles.container}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        keyboardVerticalOffset={Platform.OS === "ios" ? 90 : 0}
+      >
+        <ScrollView contentContainerStyle={styles.chatContent} keyboardShouldPersistTaps="handled">
+          <TextInput
+            style={styles.manualTitleInput}
+            placeholder="What do you need to do?"
+            placeholderTextColor={colors.textMuted}
+            value={manualTask.title}
+            onChangeText={(title) => setManualTask((prev) => ({ ...prev, title }))}
+            autoFocus
+            multiline
+          />
+          <View style={styles.editorWrap}>
+            <PendingTaskFields
+              task={manualTask}
+              onChange={setManualTask}
+              hideTitle
+              locationSuggestions={recentLocations}
+            />
+          </View>
+          {error && <Text style={styles.error}>{error}</Text>}
+        </ScrollView>
+
+        <View style={styles.manualActionsBar}>
+          <Pressable onPress={resetScreen} disabled={isSaving} hitSlop={8}>
+            <Text style={styles.secondaryButtonText}>Cancel</Text>
+          </Pressable>
+          <Pressable
+            onPress={handleSaveManual}
+            disabled={isSaving || !canSaveManualTask(manualTask)}
+            style={[
+              styles.manualSaveButton,
+              (isSaving || !canSaveManualTask(manualTask)) && styles.buttonDisabled,
+            ]}
+          >
+            {isSaving ? (
+              <ActivityIndicator color={colors.onSurfaceInverse} size="small" />
+            ) : (
+              <Text style={styles.manualSaveButtonText}>Save</Text>
+            )}
+          </Pressable>
+        </View>
+      </KeyboardAvoidingView>
+    );
+  }
 
   return (
     <KeyboardAvoidingView
@@ -197,6 +295,13 @@ export default function NewTaskScreen() {
         <AssistantBubble>
           <Text style={styles.bubbleTextAssistant}>{OPENING_QUESTION}</Text>
         </AssistantBubble>
+
+        {messages.length === 0 && !result && !isSending && (
+          <Pressable onPress={() => setIsManual(true)} style={styles.manualEntry} hitSlop={8}>
+            <Ionicons name="create-outline" size={16} color={colors.accent} />
+            <Text style={styles.manualEntryText}>Or fill in the details yourself</Text>
+          </Pressable>
+        )}
 
         {messages.map((message, index) =>
           message.role === "user" ? (
@@ -256,7 +361,7 @@ export default function NewTaskScreen() {
 
             {isEditingResult && (
               <View style={styles.editorWrap}>
-                <PendingTaskFields task={result} onChange={setResult} />
+                <PendingTaskFields task={result} onChange={setResult} locationSuggestions={recentLocations} />
               </View>
             )}
           </View>
@@ -444,6 +549,55 @@ const styles = StyleSheet.create({
   },
   buttonDisabled: {
     opacity: 0.5,
+  },
+  manualEntry: {
+    flexDirection: "row",
+    alignItems: "center",
+    alignSelf: "flex-start",
+    gap: 6,
+    paddingVertical: 6,
+    marginBottom: 10,
+  },
+  manualEntryText: {
+    color: colors.accent,
+    fontSize: 15,
+    fontWeight: "600",
+  },
+  manualTitleInput: {
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    fontSize: 18,
+    fontWeight: "600",
+    color: colors.textPrimary,
+    minHeight: 56,
+  },
+  manualActionsBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 20,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+    backgroundColor: colors.surface,
+  },
+  manualSaveButton: {
+    backgroundColor: colors.accent,
+    borderRadius: 20,
+    paddingVertical: 10,
+    paddingHorizontal: 32,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  manualSaveButtonText: {
+    color: colors.onSurfaceInverse,
+    fontSize: 16,
+    fontWeight: "600",
   },
   actionsBar: {
     flexDirection: "row",

@@ -11,7 +11,7 @@ const WEEKDAY_PREFIXES = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
 // "day_of_week:monday,thursday" is a reasonable thing for it to produce too.
 // Anything unparseable returns an empty set and the caller falls back to the
 // anchor date's own weekday / day-of-month.
-function parseWeekdays(detail: string | null): Set<number> {
+export function parseWeekdays(detail: string | null): Set<number> {
   const days = new Set<number>();
   if (!detail) return days;
   for (const match of detail.toLowerCase().matchAll(/\b(sun|mon|tue|wed|thu|fri|sat)[a-z]*/g)) {
@@ -20,7 +20,7 @@ function parseWeekdays(detail: string | null): Set<number> {
   return days;
 }
 
-function parseDayOfMonth(detail: string | null): number | null {
+export function parseDayOfMonth(detail: string | null): number | null {
   const match = detail ? /day_of_month:\s*(\d{1,2})/i.exec(detail) : null;
   if (!match) return null;
   const day = Number(match[1]);

@@ -19,7 +19,10 @@ import DayView from "../components/DayView";
 import { archivePastEvents } from "../lib/autoArchivePastEvents";
 import { getCurrentUserLocation } from "../lib/locationPermission";
 import { completeTask } from "../lib/completeTask";
-import { eventEnd, isInProgress } from "../lib/duration";
+import { ensureRecurringReminders } from "../lib/ensureRecurringReminders";
+import { isInProgress, itemEnd } from "../lib/duration";
+import { effectivePriority } from "../lib/priority";
+import { groupFlexibleByPriority } from "../lib/priorityTiers";
 import { refreshUpcomingDepartures } from "../lib/refreshUpcomingDepartures";
 import { updateDepartureForTask } from "../lib/scheduleDeparture";
 import { snoozeTask, type SnoozeOption } from "../lib/snoozeTask";
@@ -82,7 +85,7 @@ function buildTodayGroups(rows: TaskRow[], now: Date): TodayGroups {
   // whose datetime may just be a computed few-days-ahead nudge, not a fixed
   // moment) always routes to "When you have time" instead of the date/
   // priority-based sections below, whether or not it happens to have a date.
-  // An event that has started but not yet ended (it has a duration) is
+  // An event or task that has started but not yet ended (it has a duration) is
   // happening now - not overdue - so it's kept out of this list and shown with
   // the rest of today instead.
   const overdue = rows
@@ -152,39 +155,14 @@ function sectionAccent(kind: SectionKind): { text: string; soft: string } {
 // section already has its own meaningful accent color (overdue/laterToday/
 // priority), so recoloring by priority there too would just compete with
 // that. Reuses existing theme tokens rather than introducing new hues, same
-// reasoning as the rest of this app's palette. Unset priority (null) is kept
-// visually distinct from "low" - it means the task predates the app always
-// asking for priority, not that the user deliberately chose low.
+// reasoning as the rest of this app's palette. A task with no priority counts
+// as low (see effectivePriority), so it never reaches the neutral fallback
+// below - that's only for a null that isn't a task.
 function priorityAccent(priority: Priority | null): { text: string; soft: string } {
   if (priority === "high") return { text: colors.danger, soft: colors.dangerSoft };
   if (priority === "normal") return { text: colors.warning, soft: colors.warningSoft };
   if (priority === "low") return { text: colors.success, soft: colors.successSoft };
   return { text: colors.textSecondary, soft: colors.surfaceAlt };
-}
-
-interface PriorityTier {
-  key: string;
-  label: string;
-  priority: Priority | null;
-  items: TaskRow[];
-}
-
-// Splits "When you have time" into high/normal/low/unset tiers, in that
-// fixed display order, dropping any tier with nothing in it. "Unset" (a task
-// created before Aidha always asked for priority) sorts last, after "low" -
-// it's not the same as a deliberate low-priority choice.
-function groupFlexibleByPriority(flexibleList: TaskRow[]): PriorityTier[] {
-  const tiers: PriorityTier[] = [
-    { key: "high", label: "High", priority: "high", items: [] },
-    { key: "normal", label: "Medium", priority: "normal", items: [] },
-    { key: "low", label: "Low", priority: "low", items: [] },
-    { key: "none", label: "No priority set", priority: null, items: [] },
-  ];
-  const byPriority = new Map(tiers.map((tier) => [tier.priority, tier]));
-  for (const task of flexibleList) {
-    byPriority.get(task.priority)!.items.push(task);
-  }
-  return tiers.filter((tier) => tier.items.length > 0);
 }
 
 function rowIcon(kind: SectionKind, task: TaskRow): keyof typeof Ionicons.glyphMap {
@@ -243,7 +221,7 @@ export default function TodayScreen({ navigation }: Props) {
       return [];
     }
 
-    const active = await archivePastEvents((data ?? []) as TaskRow[]);
+    const active = await ensureRecurringReminders(await archivePastEvents((data ?? []) as TaskRow[]));
     const refreshed = await refreshUpcomingDepartures(active);
     setAllTasks(refreshed);
     return refreshed;
@@ -541,7 +519,7 @@ function HeroCard({
         ? {
             icon: "play-circle-outline" as const,
             text: "Happening now",
-            suffix: ` · until ${formatTime(eventEnd(task)!.toISOString())}`,
+            suffix: ` · until ${formatTime(itemEnd(task)!.toISOString())}`,
           }
       : reason === "upcoming"
         ? { icon: "time-outline" as const, text: formatRelative(new Date(task.datetime!), now), suffix: "" }
@@ -596,9 +574,7 @@ function HeroCard({
             <Ionicons name="time-outline" size={14} color={colors.accent} />
             <Text style={styles.heroRowText}>
               {formatTime(task.datetime)}
-              {task.type === "event" && task.duration_minutes
-                ? ` - ${formatTime(eventEnd(task)!.toISOString())}`
-                : ""}
+              {task.duration_minutes ? ` - ${formatTime(itemEnd(task)!.toISOString())}` : ""}
             </Text>
           </View>
         )}
@@ -655,7 +631,7 @@ function TaskRowItem({
 }) {
   // "flexible" rows are colored by priority (checkmark + title); every other
   // section keeps its own fixed section color, as before.
-  const accent = kind === "flexible" ? priorityAccent(task.priority) : sectionAccent(kind);
+  const accent = kind === "flexible" ? priorityAccent(effectivePriority(task)) : sectionAccent(kind);
   const subtitle = rowSubtitle(kind, task);
   const pillText = rowPillText(kind, task);
   const { animatedStyle, playComplete } = useCompleteAnimation();

@@ -37,6 +37,7 @@ function makeTask(overrides: Partial<TaskRow> = {}): TaskRow {
     leaving_by: null,
     leaving_notification_id: null,
     leaving_by_error: false,
+    live_activity_started_at: null,
     datetime_notification_id: null,
     created_at: "2026-11-01T00:00:00.000Z",
     ...overrides,
@@ -97,13 +98,19 @@ describe("buildDayBlocks", () => {
     ]);
   });
 
-  it("ignores a duration on a task", () => {
+  it("uses a task's own duration, and half an hour when it has none", () => {
     const blocks = buildDayBlocks(
-      [makeTask({ type: "task", datetime: new Date("2026-11-14T09:00:00").toISOString(), duration_minutes: 120 })],
+      [
+        makeTask({ id: "timed", type: "task", datetime: new Date("2026-11-14T09:00:00").toISOString(), duration_minutes: 120 }),
+        makeTask({ id: "plain", type: "task", datetime: new Date("2026-11-14T14:00:00").toISOString(), duration_minutes: null }),
+      ],
       day.start,
       day.end
     );
-    expect(blocks[0].endMinutes - blocks[0].startMinutes).toBe(30);
+    expect(blocks.map((b) => [b.id, b.endMinutes - b.startMinutes])).toEqual([
+      ["timed", 120],
+      ["plain", 30],
+    ]);
   });
 
   it("clips a long event at midnight", () => {

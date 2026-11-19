@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { TextInput, View } from "react-native";
+import { Pressable, Text, TextInput, View } from "react-native";
 import { DurationPicker, EditorActions, FieldRow, SegmentedControl, fieldEditorStyles } from "./FieldEditorUI";
 import DatePickerField from "./DatePickerField";
 import TimePickerField from "./TimePickerField";
 import { formatDuration } from "../lib/duration";
+import { effectivePriority } from "../lib/priority";
 import { colors } from "../lib/theme";
 import type { ParsedTask, Priority, RecurringFrequency, TaskType } from "../types/task";
 
@@ -43,6 +44,18 @@ function formatTimeDisplay(iso: string | null): string {
   return new Date(2000, 0, 1, h, m).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
 }
 
+function pad2(n: number): string {
+  return n.toString().padStart(2, "0");
+}
+
+function todayDateString(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+
+// What the "add a date & time" editor starts on.
+const DEFAULT_REMINDER_TIME = "09:00";
+
 function capitalize(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
@@ -55,9 +68,15 @@ function capitalize(s: string): string {
 export default function PendingTaskFields({
   task,
   onChange,
+  hideTitle = false,
+  locationSuggestions,
 }: {
   task: ParsedTask;
   onChange: (updated: ParsedTask) => void;
+  // The manual form has its own prominent title box, so it hides this row.
+  hideTitle?: boolean;
+  // The user's usual places, offered as one-tap choices in the location editor.
+  locationSuggestions?: string[];
 }) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const dateParts = naiveIsoToDateParts(task.datetime);
@@ -68,7 +87,9 @@ export default function PendingTaskFields({
   const [timeDraft, setTimeDraft] = useState(dateParts.time);
   const [durationDraft, setDurationDraft] = useState<number | null>(task.duration_minutes);
   const [locationDraft, setLocationDraft] = useState(task.location?.raw_text ?? "");
-  const [priorityDraft, setPriorityDraft] = useState<Priority | typeof NO_PRIORITY>(task.priority ?? NO_PRIORITY);
+  const [priorityDraft, setPriorityDraft] = useState<Priority | typeof NO_PRIORITY>(
+    effectivePriority(task) ?? NO_PRIORITY
+  );
   const [recurrenceFrequencyDraft, setRecurrenceFrequencyDraft] = useState<
     RecurringFrequency | typeof NO_RECURRENCE
   >(task.recurring?.frequency ?? NO_RECURRENCE);
@@ -95,6 +116,10 @@ export default function PendingTaskFields({
       case "type":
         setTypeDraft(task.type);
         break;
+      case "reminder":
+        setDateDraft(todayDateString());
+        setTimeDraft(DEFAULT_REMINDER_TIME);
+        break;
       case "date":
         setDateDraft(parts.date);
         break;
@@ -108,7 +133,7 @@ export default function PendingTaskFields({
         setLocationDraft(task.location?.raw_text ?? "");
         break;
       case "priority":
-        setPriorityDraft(task.priority ?? NO_PRIORITY);
+        setPriorityDraft(effectivePriority(task) ?? NO_PRIORITY);
         break;
       case "recurrence":
         setRecurrenceFrequencyDraft(task.recurring?.frequency ?? NO_RECURRENCE);
@@ -126,6 +151,15 @@ export default function PendingTaskFields({
   function handleSaveType() {
     onChange({ ...task, type: typeDraft });
     closeField("type");
+  }
+
+  // For a task with no date yet: gives it one, which also reveals the Date,
+  // Time and Duration rows below (they only show once a date exists).
+  function handleAddReminder() {
+    const nextDatetime = datePartsToNaiveIso(dateDraft, timeDraft || DEFAULT_REMINDER_TIME);
+    if (!nextDatetime) return;
+    onChange({ ...task, datetime: nextDatetime, date_certainty: "exact" });
+    closeField("reminder");
   }
 
   function handleSaveDate() {
@@ -174,18 +208,20 @@ export default function PendingTaskFields({
 
   return (
     <View style={fieldEditorStyles.detailsCard}>
-      <FieldRow
-        icon="create-outline"
-        label="Title"
-        value={task.title}
-        expanded={!!expanded.title}
-        onToggle={() => toggleField("title")}
-      >
-        <View style={fieldEditorStyles.inlineEditorRow}>
-          <TextInput style={fieldEditorStyles.inlineInput} value={titleDraft} onChangeText={setTitleDraft} autoFocus />
-        </View>
-        <EditorActions onSave={handleSaveTitle} onCancel={() => closeField("title")} saving={false} />
-      </FieldRow>
+      {!hideTitle && (
+        <FieldRow
+          icon="create-outline"
+          label="Title"
+          value={task.title}
+          expanded={!!expanded.title}
+          onToggle={() => toggleField("title")}
+        >
+          <View style={fieldEditorStyles.inlineEditorRow}>
+            <TextInput style={fieldEditorStyles.inlineInput} value={titleDraft} onChangeText={setTitleDraft} autoFocus />
+          </View>
+          <EditorActions onSave={handleSaveTitle} onCancel={() => closeField("title")} saving={false} />
+        </FieldRow>
+      )}
 
       <FieldRow
         icon="layers-outline"
@@ -204,6 +240,21 @@ export default function PendingTaskFields({
         />
         <EditorActions onSave={handleSaveType} onCancel={() => closeField("type")} saving={false} />
       </FieldRow>
+
+      {!showDateTimeRows && (
+        <FieldRow
+          icon="alarm-outline"
+          label="Date & time"
+          value="Not set - tap to add"
+          valueColor={colors.accent}
+          expanded={!!expanded.reminder}
+          onToggle={() => toggleField("reminder")}
+        >
+          <DatePickerField value={dateDraft} onChange={setDateDraft} />
+          <TimePickerField value={timeDraft} onChange={setTimeDraft} />
+          <EditorActions onSave={handleAddReminder} onCancel={() => closeField("reminder")} saving={false} />
+        </FieldRow>
+      )}
 
       {showDateTimeRows && (
         <FieldRow
@@ -231,7 +282,7 @@ export default function PendingTaskFields({
         </FieldRow>
       )}
 
-      {showDateTimeRows && task.type === "event" && (
+      {showDateTimeRows && (
         <FieldRow
           icon="hourglass-outline"
           label="Duration"
@@ -261,19 +312,39 @@ export default function PendingTaskFields({
             autoFocus
           />
         </View>
+        {locationSuggestions && locationSuggestions.length > 0 && (
+          <View style={[fieldEditorStyles.segmentedControl, { marginTop: 10 }]}>
+            {locationSuggestions.map((place) => {
+              const selected = locationDraft === place;
+              return (
+                <Pressable
+                  key={place}
+                  onPress={() => setLocationDraft(place)}
+                  style={[fieldEditorStyles.segment, selected && fieldEditorStyles.segmentSelected]}
+                >
+                  <Text style={[fieldEditorStyles.segmentText, selected && fieldEditorStyles.segmentTextSelected]}>
+                    {place}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        )}
         <EditorActions onSave={handleSaveLocation} onCancel={() => closeField("location")} saving={false} />
       </FieldRow>
 
       <FieldRow
         icon="flag-outline"
         label="Priority"
-        value={task.priority ? capitalize(task.priority) : "None"}
+        value={effectivePriority(task) ? capitalize(effectivePriority(task)!) : "None"}
         expanded={!!expanded.priority}
         onToggle={() => toggleField("priority")}
       >
         <SegmentedControl
           options={[
-            { label: "None", value: NO_PRIORITY },
+            // "None" is only meaningful for an event; for a task, no priority
+            // simply means low, so Low is the way to say it.
+            ...(task.type === "task" ? [] : [{ label: "None", value: NO_PRIORITY }]),
             { label: "Low", value: "low" as Priority },
             { label: "Normal", value: "normal" as Priority },
             { label: "High", value: "high" as Priority },

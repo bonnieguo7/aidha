@@ -18,7 +18,7 @@ const EXTRACT_TASK_TOOL = {
         type: "string",
         enum: ["event", "task"],
         description:
-          "'event' = has a fixed time/place the user must physically attend. 'task' = an action item, may or may not have a location or deadline.",
+          "'event' = has a fixed time/place the user must physically attend. 'task' = an action item, may or may not have a location or deadline. Decided only by what the item is - a stated time or length (e.g. 'for an hour', '2 to 4pm') never makes a task an event.",
       },
       title: {
         type: "string",
@@ -86,12 +86,12 @@ const EXTRACT_TASK_TOOL = {
       duration_minutes: {
         type: ["integer", "null"],
         description:
-          "Events only. How long the event lasts, in minutes, but ONLY when the user stated a length ('a 2 hour dinner' -> 120, 'a 45 minute class' -> 45). Null when they gave no length, and always null for a 'task'. Never guess a typical length.",
+          "How long it lasts, in minutes, but ONLY when the user stated a length ('a 2 hour dinner' -> 120, 'study for 2 hours' -> 120, 'call mom for an hour' -> 60). Applies to both events and tasks. Null when they gave no length. Never guess a typical length, and never let a stated length change the 'type'.",
       },
       end_datetime: {
         type: ["string", "null"],
         description:
-          "Events only. When the event ends, as local wall-clock 'YYYY-MM-DDTHH:mm:ss', but ONLY when the user gave an end time or a range ('5 to 6:30', 'until 8'). Do NOT work out a length from it - the app subtracts the start itself. Null when no end time was given, and always null for a 'task'. Leave duration_minutes null when you use this.",
+          "When it ends, as local wall-clock 'YYYY-MM-DDTHH:mm:ss', but ONLY when the user gave an end time or a range ('5 to 6:30', 'until 8', '2 to 4pm'). Applies to both events and tasks. Do NOT work out a length from it - the app subtracts the start itself. Null when no end time was given. Leave duration_minutes null when you use this.",
       },
     },
     required: ["type", "title", "date_certainty", "requires_downtime", "needs_clarification"],
@@ -250,6 +250,26 @@ Rules:
   null, requires_downtime: true. Do not ask for an exact time in this case.
 - Relative dates ("Friday", "the 1st", "today") -> resolve to an absolute
   local datetime using the current local date/time above.
+- Times of day are real answers, not gaps. When the user gives a part of the
+  day instead of a clock time - in their first message or as the answer to
+  your question - turn it into this local time on the day in question: "first
+  thing" 08:00; "morning" 09:00; "noon", "midday", "lunch" or "lunchtime"
+  12:00; "afternoon" 15:00; "end of day" or "EOD" 17:00; "after work" or
+  "evening" 18:00; "tonight" 20:00; "night" 21:00. Set date_certainty
+  "exact". Never treat one as vague ("approximate" is only for urgency with
+  no day at all, like "ASAP" or "soon"), and never ask a follow-up for a more
+  exact time after one. Use confirmation_note to say which time you chose,
+  e.g. "I set that for 9am - tap the pencil if you'd like a different
+  time." Worked example - user: "I need to cash in my security deposit" ->
+  you ask "When do you need to cash in your security deposit?" -> "Tuesday"
+  -> you ask "What time on Tuesday do you need to cash in your security
+  deposit?" -> "Morning" -> datetime is that Tuesday at 09:00:00,
+  date_certainty "exact", requires_downtime false.
+- Whenever you know the day something is due or happens but not the time, and
+  you are about to finish without it (including when you have run out of
+  questions), set datetime to 09:00:00 on that day with date_certainty
+  "exact" and say so in confirmation_note. Never leave datetime null, or set
+  it to midnight (00:00:00), when a specific day is known.
 - For a "task" about booking, reserving, or purchasing something ahead of a
   future date (bus/train/flight tickets, restaurant reservations, event
   tickets, and the like) - the date the user gives is normally the date of
@@ -279,13 +299,23 @@ Rules:
   ("What date are you traveling?"), not a vague
   "what date do you need it for" - this reasoning depends on knowing that's
   the trip date, not a self-imposed deadline.
-- Duration (events only): if the user says how long an event lasts ("a 2
-  hour dinner", "my 45 minute class"), set duration_minutes to that length in
-  minutes. If they instead give an end time or a range ("5 to 6:30pm", "until
-  8"), set end_datetime to that end (same local format as datetime) and leave
-  duration_minutes null - the app does the subtraction. If they gave neither,
-  leave both null: never guess a typical length, and never ask about it.
-  Tasks never have a duration.
+- Event vs task is decided by what the item IS, never by whether a time or
+  length was given. An "event" is something the user has to physically go to
+  or be at: a class, a gym session, an appointment, a dinner, a meeting in
+  person. A "task" is something the user does themselves, wherever they
+  are: a phone call, studying, working on something, writing, paying a bill,
+  an email - even when it has an exact time and a length. So "Call mom at
+  5pm for an hour", "Study for my exam at 7pm for 2 hours" and "Work on the
+  slides from 2 to 4pm" are all tasks; "Gym at 6pm for an hour" and "Dentist
+  at 3pm for 45 minutes" are events. A stated length or time range is never a
+  reason to call something an event.
+- Duration (events AND tasks): if the user says how long something lasts ("a
+  2 hour dinner", "study for 2 hours", "call mom for an hour"), set
+  duration_minutes to that length in minutes. If they instead give an end
+  time or a range ("5 to 6:30pm", "until 8", "from 2 to 4"), set end_datetime
+  to that end (same local format as datetime) and leave duration_minutes
+  null - the app does the subtraction. If they gave neither, leave both
+  null: never guess a typical length, and never ask about it.
 - When you set datetime, format it as 'YYYY-MM-DDTHH:mm:ss' in local wall-clock
   time - the exact hour/minute the user means in their own timezone. Never
   append 'Z' or a UTC offset, and never shift the hour to compensate for a
@@ -542,9 +572,8 @@ Deno.serve(async (req) => {
     }
 
     // Same reasoning for duration: the model reports a stated length or end
-    // time, and the minutes are worked out here. Tasks never carry one.
-    const duration =
-      rest.type === "event" ? resolveDurationMinutes(duration_minutes, datetime, end_datetime) : null;
+    // time, and the minutes are worked out here. Events and tasks both carry one.
+    const duration = resolveDurationMinutes(duration_minutes, datetime, end_datetime);
 
     return jsonResponse({ type: "result", data: { ...rest, datetime, duration_minutes: duration } }, 200);
   }

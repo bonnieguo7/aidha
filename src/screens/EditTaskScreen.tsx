@@ -14,6 +14,8 @@ import {
 } from "react-native";
 import { confirmDelete } from "../lib/confirmDelete";
 import { formatDuration } from "../lib/duration";
+import { leavingByDetails } from "../lib/leavingByDetails";
+import { effectivePriority } from "../lib/priority";
 import { isoToLocalNaive, localIsoNow, localNaiveToUtcIso } from "../lib/localDatetime";
 import { getCurrentUserLocation } from "../lib/locationPermission";
 import { openInMaps } from "../lib/maps";
@@ -215,6 +217,8 @@ function FieldRow({
   onToggle,
   bordered = true,
   readOnly = false,
+  valueLines = 1,
+  details,
   children,
 }: {
   icon: keyof typeof Ionicons.glyphMap;
@@ -227,6 +231,10 @@ function FieldRow({
   onToggle: () => void;
   bordered?: boolean;
   readOnly?: boolean;
+  // How many lines the value may wrap to before it's cut off (default 1).
+  valueLines?: number;
+  // Extra lines under the value, each shown in full (wrapping as needed).
+  details?: string[];
   children?: React.ReactNode;
 }) {
   return (
@@ -237,9 +245,14 @@ function FieldRow({
         </View>
         <View style={styles.fieldRowText}>
           <Text style={styles.fieldRowLabel}>{label}</Text>
-          <Text style={[styles.fieldRowValue, valueColor ? { color: valueColor } : null]} numberOfLines={1}>
+          <Text style={[styles.fieldRowValue, valueColor ? { color: valueColor } : null]} numberOfLines={valueLines}>
             {value}
           </Text>
+          {details?.map((line, index) => (
+            <Text key={index} style={styles.fieldRowDetail}>
+              {line}
+            </Text>
+          ))}
         </View>
         {!readOnly && <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />}
       </Pressable>
@@ -256,7 +269,16 @@ function AskBubble({ role, children }: { role: "user" | "assistant"; children: s
   );
 }
 
-export default function EditTaskScreen({ route, navigation }: Props) {
+// The screen copies its task from the route into its own state when it first
+// mounts. If the stack already has this screen open for one task (say you opened
+// a task, then switched tabs) and navigation points it at a different task, the
+// route's params change but a mounted screen keeps showing the old task. Keying
+// on the task id makes it start over for the new one instead.
+export default function EditTaskScreen(props: Props) {
+  return <EditTaskScreenContent key={props.route.params.task.id} {...props} />;
+}
+
+function EditTaskScreenContent({ route, navigation }: Props) {
   const [taskData, setTaskData] = useState<TaskRow>(route.params.task);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [savingField, setSavingField] = useState<string | null>(null);
@@ -272,7 +294,7 @@ export default function EditTaskScreen({ route, navigation }: Props) {
   const [durationDraft, setDurationDraft] = useState<number | null>(taskData.duration_minutes);
   const [typeDraft, setTypeDraft] = useState<TaskType>(taskData.type);
   const [priorityDraft, setPriorityDraft] = useState<Priority | typeof NO_PRIORITY>(
-    taskData.priority ?? NO_PRIORITY
+    effectivePriority(taskData) ?? NO_PRIORITY
   );
   const [recurrenceFrequencyDraft, setRecurrenceFrequencyDraft] = useState<
     RecurringFrequency | typeof NO_RECURRENCE
@@ -355,7 +377,7 @@ export default function EditTaskScreen({ route, navigation }: Props) {
         setTypeDraft(taskData.type);
         break;
       case "priority":
-        setPriorityDraft(taskData.priority ?? NO_PRIORITY);
+        setPriorityDraft(effectivePriority(taskData) ?? NO_PRIORITY);
         break;
       case "recurrence":
         setRecurrenceFrequencyDraft(taskData.recurring_frequency ?? NO_RECURRENCE);
@@ -391,7 +413,9 @@ export default function EditTaskScreen({ route, navigation }: Props) {
     if (key === "location" || key === "date" || key === "time") {
       maybeUpdateDeparture(updated);
     }
-    if (key === "date" || key === "time") {
+    // The reminder's text (title, location) and schedule (time, repeat rule) are
+    // fixed when it's scheduled, so any of these means rescheduling it.
+    if (key === "date" || key === "time" || key === "title" || key === "location" || key === "recurrence") {
       maybeSyncDueNotification(updated);
     }
   }
@@ -452,6 +476,10 @@ export default function EditTaskScreen({ route, navigation }: Props) {
       setError(
         "Something went wrong saving the reminder. Make sure your database is up to date (npx supabase db push) and try again."
       );
+    } else if (updated.leaving_by_error) {
+      // A retry that fails again would otherwise change nothing on screen, which
+      // looks like the tap did nothing.
+      setError("Still unable to calculate. The maps service may be having trouble - try again in a minute.");
     }
   }
 
@@ -633,7 +661,12 @@ export default function EditTaskScreen({ route, navigation }: Props) {
     if (patch.location !== undefined || patch.datetime !== undefined) {
       maybeUpdateDeparture(updated);
     }
-    if (patch.datetime !== undefined) {
+    if (
+      patch.datetime !== undefined ||
+      patch.title !== undefined ||
+      patch.location !== undefined ||
+      patch.recurring !== undefined
+    ) {
       maybeSyncDueNotification(updated);
     }
   }
@@ -783,7 +816,7 @@ export default function EditTaskScreen({ route, navigation }: Props) {
             </FieldRow>
           )}
 
-          {showDateTimeRows && taskData.type === "event" && (
+          {showDateTimeRows && (
             <FieldRow
               icon="hourglass-outline"
               label="Duration"
@@ -882,6 +915,7 @@ export default function EditTaskScreen({ route, navigation }: Props) {
               icon="pin-outline"
               label="Resolved to"
               value={taskData.resolved_address}
+              valueLines={3}
               expanded={false}
               onToggle={() => {}}
               readOnly
@@ -894,32 +928,38 @@ export default function EditTaskScreen({ route, navigation }: Props) {
               label="Leaving by"
               value={
                 taskData.leaving_by_error
-                  ? "Unable to calculate"
-                  : [
-                      formatTimeDisplay(taskData.leaving_by),
-                      taskData.departure_origin_label ? `from ${taskData.departure_origin_label}` : null,
-                      taskData.travel_directions_summary,
-                    ]
-                      .filter(Boolean)
-                      .join(" · ")
+                  ? isSettingUpDeparture
+                    ? "Retrying…"
+                    : "Unable to calculate - tap to retry"
+                  : formatTimeDisplay(taskData.leaving_by)
               }
+              // The distance, starting point and directions go on their own
+              // lines under the time. Joined into one line they were cut off
+              // as soon as there was a long route.
+              details={taskData.leaving_by_error ? undefined : leavingByDetails(taskData)}
+              valueLines={2}
               valueColor={taskData.leaving_by_error ? colors.warning : colors.accent}
               expanded={false}
-              onToggle={() => {}}
-              readOnly
+              // A failed calculation can be retried by tapping the row (same
+              // action as "Tap to set up a reminder"); a successful one is
+              // display-only, and so is the row while a retry is running.
+              onToggle={taskData.leaving_by_error ? handleSetupDeparture : () => {}}
+              readOnly={!taskData.leaving_by_error || isSettingUpDeparture}
             />
           )}
 
           <FieldRow
             icon="flag-outline"
             label="Priority"
-            value={taskData.priority ? capitalize(taskData.priority) : "None"}
+            value={effectivePriority(taskData) ? capitalize(effectivePriority(taskData)!) : "None"}
             expanded={!!expanded.priority}
             onToggle={() => toggleField("priority")}
           >
             <SegmentedControl
               options={[
-                { label: "None", value: NO_PRIORITY },
+                // "None" is only meaningful for an event; for a task, no
+                // priority simply means low, so Low is the way to say it.
+                ...(taskData.type === "task" ? [] : [{ label: "None", value: NO_PRIORITY }]),
                 { label: "Low", value: "low" as Priority },
                 { label: "Normal", value: "normal" as Priority },
                 { label: "High", value: "high" as Priority },
@@ -1055,6 +1095,12 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surfaceAlt,
     alignItems: "center",
     justifyContent: "center",
+  },
+  fieldRowDetail: {
+    fontSize: 13,
+    lineHeight: 18,
+    color: colors.textSecondary,
+    marginTop: 2,
   },
   fieldRowText: {
     flex: 1,

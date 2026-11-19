@@ -3,9 +3,9 @@ import { DEFAULT_EVENT_MINUTES } from "./duration";
 
 export const MINUTES_PER_DAY = 24 * 60;
 
-// A block needs a length to be visible on the grid. An event uses its own
-// duration when it has one and an hour otherwise (DEFAULT_EVENT_MINUTES); a
-// timed task has no duration, so it reads as a short half-hour slot.
+// A block needs a length to be visible on the grid. An event or task uses its
+// own duration when it has one; otherwise an event reads as an hour
+// (DEFAULT_EVENT_MINUTES) and a timed task as a short half-hour slot.
 const TASK_MINUTES = 30;
 // A "leave by" block shorter than this would be too thin to read or tap.
 const MIN_TRAVEL_MINUTES = 15;
@@ -48,7 +48,7 @@ export function buildDayBlocks(tasks: TaskRow[], dayStart: Date, dayEnd: Date): 
     if (Number.isNaN(start.getTime()) || start < dayStart || start >= dayEnd) continue;
 
     const startMinutes = dayMinutes(start, dayStart, dayEnd);
-    const length = task.type === "event" ? (task.duration_minutes ?? DEFAULT_EVENT_MINUTES) : TASK_MINUTES;
+    const length = task.duration_minutes ?? (task.type === "event" ? DEFAULT_EVENT_MINUTES : TASK_MINUTES);
     blocks.push({
       id: task.id,
       kind: task.type === "event" ? "event" : "task",

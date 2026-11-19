@@ -3,6 +3,7 @@ import { geocodeLocation } from "./geocoding";
 import { reverseGeocodeLabel } from "./locationPermission";
 import { cancelNotification, scheduleLeavingNotification } from "./notifications";
 import { computeLeavingBy } from "./leavingBy";
+import { shouldRestartLiveActivity } from "./liveActivityRestart";
 import { supabase } from "./supabase";
 import { selectTravelRoute } from "./travelTime";
 import type { TaskRow } from "../types/task";
@@ -90,6 +91,15 @@ export async function updateDepartureForTask(task: TaskRow, userLocation: Coords
     leavingBy
   );
 
+  // If the time moved far enough that the Live Activity already started for it
+  // is for the wrong moment, let the server start a fresh one when the new time
+  // comes within range.
+  const restartLiveActivity = shouldRestartLiveActivity({
+    startedAt: task.live_activity_started_at ?? null,
+    previousLeavingBy: task.leaving_by,
+    newLeavingBy: leavingBy,
+  });
+
   return applyPatch(task, {
     latitude: destination.latitude,
     longitude: destination.longitude,
@@ -100,5 +110,6 @@ export async function updateDepartureForTask(task: TaskRow, userLocation: Coords
     leaving_by: leavingBy.toISOString(),
     leaving_notification_id: notificationId,
     leaving_by_error: false,
+    ...(restartLiveActivity ? { live_activity_started_at: null } : {}),
   });
 }

@@ -1,6 +1,6 @@
 import {
-  eventEnd,
   formatDuration,
+  itemEnd,
   isInProgress,
   parseDurationInput,
 } from "../duration";
@@ -48,22 +48,22 @@ describe("parseDurationInput", () => {
   });
 });
 
-describe("eventEnd", () => {
+describe("itemEnd", () => {
   it("adds the duration to an event's start", () => {
-    expect(eventEnd(event("2026-11-14T19:00:00", 90))).toEqual(at("2026-11-14T20:30:00"));
+    expect(itemEnd(event("2026-11-14T19:00:00", 90))).toEqual(at("2026-11-14T20:30:00"));
   });
 
   it("ends an event with no duration the moment it starts", () => {
-    expect(eventEnd(event("2026-11-14T19:00:00", null))).toEqual(at("2026-11-14T19:00:00"));
+    expect(itemEnd(event("2026-11-14T19:00:00", null))).toEqual(at("2026-11-14T19:00:00"));
   });
 
-  it("ignores a duration on a task", () => {
+  it("applies a duration to a task just like an event", () => {
     const task = { ...event("2026-11-14T19:00:00", 90), type: "task" as const };
-    expect(eventEnd(task)).toEqual(at("2026-11-14T19:00:00"));
+    expect(itemEnd(task)).toEqual(at("2026-11-14T20:30:00"));
   });
 
   it("is null with no datetime", () => {
-    expect(eventEnd({ type: "event", datetime: null, duration_minutes: 60 })).toBeNull();
+    expect(itemEnd({ datetime: null, duration_minutes: 60 })).toBeNull();
   });
 });
 
@@ -77,8 +77,14 @@ describe("isInProgress", () => {
     expect(isInProgress(e, at("2026-11-14T20:00:00"))).toBe(false);
   });
 
-  it("is never true for an event without a duration", () => {
+  it("is never true for an item without a duration", () => {
     expect(isInProgress(event("2026-11-14T19:00:00", null), at("2026-11-14T19:00:00"))).toBe(false);
+  });
+
+  it("is true for a task with a duration while it's under way", () => {
+    const task = { ...event("2026-11-14T19:00:00", 120), type: "task" as const };
+    expect(isInProgress(task, at("2026-11-14T20:00:00"))).toBe(true);
+    expect(isInProgress(task, at("2026-11-14T21:00:00"))).toBe(false);
   });
 });
 

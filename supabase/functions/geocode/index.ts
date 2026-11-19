@@ -1,5 +1,6 @@
 import { z } from "https://esm.sh/zod@3.23.8";
 import { corsHeaders } from "../_shared/cors.ts";
+import { describeGoogleError } from "../_shared/googleError.ts";
 
 // Google Maps Platform key with the Geocoding API enabled. Never exposed to the
 // client - this function is the only thing that ever sees it.
@@ -37,7 +38,7 @@ interface GeocodeResult extends Coords {
 // outrank the one actually named in the text.
 // Returns null (rather than throwing) on any failure so the caller can fall back
 // to another strategy instead of failing the whole request.
-async function geocodeViaPlaces(query: string, bias?: Coords): Promise<GeocodeResult | null> {
+async function geocodeViaPlaces(query: string, errors: string[], bias?: Coords): Promise<GeocodeResult | null> {
   try {
     const body: Record<string, unknown> = { textQuery: query };
     if (bias) {
@@ -58,6 +59,9 @@ async function geocodeViaPlaces(query: string, bias?: Coords): Promise<GeocodeRe
     const data = await res.json();
     if (!res.ok) {
       console.error("Places (New) searchText HTTP error", { query, biased: Boolean(bias), status: res.status, data });
+      errors.push(
+        describeGoogleError(`Places (New) HTTP ${res.status}`, { status: data?.error?.status, message: data?.error?.message })
+      );
       return null;
     }
     const place = data.places?.[0];
@@ -79,6 +83,7 @@ async function geocodeViaPlaces(query: string, bias?: Coords): Promise<GeocodeRe
     };
   } catch (err) {
     console.error("Places (New) searchText threw", { query, biased: Boolean(bias), err: String(err) });
+    errors.push(describeGoogleError("Places (New) request failed", { message: String(err) }));
     return null;
   }
 }
@@ -104,8 +109,11 @@ Deno.serve(async (req) => {
     return jsonResponse({ error: "Invalid request.", details: parsedRequest.error.flatten() }, 400);
   }
 
+  // Why each Google call failed, returned only if the whole lookup comes up empty.
+  const googleErrors: string[] = [];
+
   if (parsedRequest.data.bias) {
-    const biasedResult = await geocodeViaPlaces(parsedRequest.data.query, parsedRequest.data.bias);
+    const biasedResult = await geocodeViaPlaces(parsedRequest.data.query, googleErrors, parsedRequest.data.bias);
     if (biasedResult) {
       return jsonResponse(
         {
@@ -123,7 +131,7 @@ Deno.serve(async (req) => {
   // there was no bias to try in the first place, and the case where the biased
   // attempt came back empty because the named place isn't near the user's
   // current location (e.g. a specific branch across town, or in another city).
-  const unbiasedResult = await geocodeViaPlaces(parsedRequest.data.query);
+  const unbiasedResult = await geocodeViaPlaces(parsedRequest.data.query, googleErrors);
   if (unbiasedResult) {
     return jsonResponse(
       {
@@ -157,13 +165,20 @@ Deno.serve(async (req) => {
   if (data.status !== "OK" || !data.results?.[0]) {
     // Not found is a normal, expected outcome (e.g. a vague or made-up location) -
     // not a server error, so the caller can show a clear "couldn't find that place"
-    // state rather than a generic failure.
-    return jsonResponse({ found: false }, 200);
+    // state rather than a generic failure. ZERO_RESULTS is that normal case; any
+    // other status (REQUEST_DENIED, OVER_QUERY_LIMIT...) means Google refused the
+    // request, which is worth reporting.
+    if (data.status !== "ZERO_RESULTS") {
+      googleErrors.push(
+        describeGoogleError("Geocoding", { status: data.status, message: data.error_message })
+      );
+    }
+    return jsonResponse({ found: false, google_errors: googleErrors }, 200);
   }
 
   const location = data.results[0].geometry?.location;
   if (typeof location?.lat !== "number" || typeof location?.lng !== "number") {
-    return jsonResponse({ found: false }, 200);
+    return jsonResponse({ found: false, google_errors: googleErrors }, 200);
   }
 
   const formattedAddress =

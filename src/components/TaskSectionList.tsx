@@ -15,6 +15,7 @@ import {
 import CalendarMonthView, { dateKey } from "./CalendarMonthView";
 import { archivePastEvents } from "../lib/autoArchivePastEvents";
 import { completeTask } from "../lib/completeTask";
+import { ensureRecurringReminders } from "../lib/ensureRecurringReminders";
 import { confirmDelete } from "../lib/confirmDelete";
 import { openInMaps } from "../lib/maps";
 import { cancelNotification } from "../lib/notifications";
@@ -198,7 +199,7 @@ export default function TaskSectionList({
       setAllTasks(rows);
       return;
     }
-    const active = await archivePastEvents(rows);
+    const active = await ensureRecurringReminders(await archivePastEvents(rows));
     setAllTasks(await refreshUpcomingDepartures(active));
 
     // Separate, unfiltered fetch for the calendar: rows above only cover

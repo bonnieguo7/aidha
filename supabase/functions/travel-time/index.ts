@@ -1,5 +1,6 @@
 import { z } from "https://esm.sh/zod@3.23.8";
 import { corsHeaders } from "../_shared/cors.ts";
+import { describeGoogleError } from "../_shared/googleError.ts";
 
 const GOOGLE_MAPS_API_KEY = Deno.env.get("GOOGLE_MAPS_API_KEY");
 
@@ -65,7 +66,8 @@ async function fetchDirections(
   origin: { latitude: number; longitude: number },
   destination: { latitude: number; longitude: number },
   mode: "transit" | "walking" | "driving",
-  arrivalUnixSeconds: number | null
+  arrivalUnixSeconds: number | null,
+  errors: string[]
 ): Promise<DirectionsResult | null> {
   const url = new URL("https://maps.googleapis.com/maps/api/directions/json");
   url.searchParams.set("origin", toCoordParam(origin));
@@ -81,10 +83,20 @@ async function fetchDirections(
   }
 
   const response = await fetch(url);
-  if (!response.ok) return null;
+  if (!response.ok) {
+    errors.push(describeGoogleError(`Directions (${mode}) HTTP ${response.status}`, {}));
+    return null;
+  }
 
   const data = await response.json();
-  if (data.status !== "OK" || !data.routes?.[0]?.legs?.[0]) return null;
+  if (data.status !== "OK" || !data.routes?.[0]?.legs?.[0]) {
+    // ZERO_RESULTS just means no route exists (normal); anything else means
+    // Google refused the request.
+    if (data.status !== "ZERO_RESULTS") {
+      errors.push(describeGoogleError(`Directions (${mode})`, { status: data.status, message: data.error_message }));
+    }
+    return null;
+  }
 
   const leg = data.routes[0].legs[0];
   const seconds = leg.duration_in_traffic?.value ?? leg.duration?.value;
@@ -120,20 +132,22 @@ Deno.serve(async (req) => {
     ? null
     : Math.floor(arrivalDate.getTime() / 1000);
 
+  // Why each Google call failed, returned only if no route is found.
+  const googleErrors: string[] = [];
   let result: DirectionsResult | null;
   try {
-    result = await fetchDirections(origin, destination, mode, arrivalUnixSeconds);
+    result = await fetchDirections(origin, destination, mode, arrivalUnixSeconds, googleErrors);
     // Transit directions are commonly unavailable (no nearby service, no data for
     // the route) - fall back to walking rather than failing the whole request.
     if (result === null && mode === "transit") {
-      result = await fetchDirections(origin, destination, "walking", null);
+      result = await fetchDirections(origin, destination, "walking", null, googleErrors);
     }
   } catch (err) {
     return jsonResponse({ error: `Failed to reach Google Directions API: ${String(err)}` }, 502);
   }
 
   if (result === null) {
-    return jsonResponse({ found: false }, 200);
+    return jsonResponse({ found: false, google_errors: googleErrors }, 200);
   }
 
   return jsonResponse(

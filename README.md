@@ -33,6 +33,8 @@ aidha/
       dayLayout.ts              day-view block + overlap layout (pure, unit tested)
       duration.ts               event duration helpers: end time, in-progress, formatting
       completeTask.ts           complete + create next occurrence of a recurring task
+      recurringTriggers.ts      which repeating notifications a repeat rule needs (pure, unit tested)
+      ensureRecurringReminders.ts  upgrades/repairs repeating reminders when lists load
       scheduleDeparture.ts      updateDepartureForTask orchestration
       constants.ts              DEPARTURE_BUFFER_MINUTES
     screens/

@@ -1,6 +1,7 @@
 import { Ionicons } from "@expo/vector-icons";
 import { StyleSheet, Text, View } from "react-native";
 import { formatDuration } from "../lib/duration";
+import { effectivePriority } from "../lib/priority";
 import { colors } from "../lib/theme";
 import type { ClarificationField, ParsedTask } from "../types/task";
 
@@ -48,13 +49,16 @@ export default function TaskCard({ task }: { task: ParsedTask }) {
   const showWhen = Boolean(task.datetime) || task.date_certainty !== "none" || isFlagged("datetime");
   const whenText = task.datetime
     ? formatDatetime(task.datetime) +
-      (task.type === "event" && task.duration_minutes ? ` · ${formatDuration(task.duration_minutes)}` : "")
+      (task.duration_minutes ? ` · ${formatDuration(task.duration_minutes)}` : "")
     : task.date_certainty === "approximate"
       ? "Soon (no fixed time)"
       : "No deadline set";
 
   const showLocation = Boolean(task.location) || isFlagged("location");
-  const showPriority = Boolean(task.priority) || isFlagged("priority");
+  // A task with no priority is assumed low, so it's never "unclear"; only an
+  // event (which has none) could still be flagged.
+  const priority = effectivePriority(task);
+  const showPriority = Boolean(priority) || isFlagged("priority");
   const showRecurrence = Boolean(task.recurring) || isFlagged("recurrence");
 
   return (
@@ -79,8 +83,8 @@ export default function TaskCard({ task }: { task: ParsedTask }) {
       {showPriority && (
         <Row
           icon="flag-outline"
-          text={task.priority ? `${task.priority} priority` : "Priority unclear"}
-          flagged={isFlagged("priority")}
+          text={priority ? `${priority} priority` : "Priority unclear"}
+          flagged={!priority && isFlagged("priority")}
         />
       )}
 

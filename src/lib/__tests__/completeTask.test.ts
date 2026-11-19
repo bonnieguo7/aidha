@@ -47,6 +47,7 @@ function makeTask(overrides: Partial<TaskRow> = {}): TaskRow {
     leaving_by: null,
     leaving_notification_id: null,
     leaving_by_error: false,
+    live_activity_started_at: null,
     datetime_notification_id: null,
     created_at: "2026-11-01T00:00:00.000Z",
     ...overrides,

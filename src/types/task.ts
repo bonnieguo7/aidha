@@ -23,8 +23,9 @@ export interface ParsedTask {
   requires_downtime: boolean;
   needs_clarification: ClarificationField[];
   confirmation_note: string | null;
-  // Events only: how long it lasts, when the user said ("2 hour dinner",
-  // "5 to 6:30"). Null = unknown, which the Day view draws as an hour.
+  // How long it lasts, when the user said ("2 hour dinner", "study for 2
+  // hours", "5 to 6:30"). Null = unknown; the Day view then draws an event as an
+  // hour and a task as half an hour.
   duration_minutes: number | null;
 }
 
@@ -83,7 +84,7 @@ export interface TaskRow {
   recurring_detail: string | null;
   priority: Priority | null;
   requires_downtime: boolean;
-  // Events only; null = no duration set (see ParsedTask.duration_minutes).
+  // Null = no duration set (see ParsedTask.duration_minutes).
   duration_minutes: number | null;
   is_completed: boolean;
   latitude: number | null;
@@ -95,6 +96,9 @@ export interface TaskRow {
   leaving_by: string | null;
   leaving_notification_id: string | null;
   leaving_by_error: boolean;
+  // Set by the server once it has started a Live Activity for this task (see
+  // liveActivityRestart.ts for when the app clears it again).
+  live_activity_started_at: string | null;
   // Separate from leaving_notification_id: fires at the task/event's own
   // datetime (e.g. "pick up dry cleaning" firing at 10am), regardless of
   // whether there's a location to compute a "leaving by" reminder from.

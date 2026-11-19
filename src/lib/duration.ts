@@ -7,7 +7,7 @@ export const MAX_DURATION_MINUTES = 24 * 60;
 // One-tap choices in the duration editors.
 export const DURATION_PRESETS = [30, 60, 90, 120, 180] as const;
 
-type TimedTask = Pick<TaskRow, "type" | "datetime" | "duration_minutes">;
+type TimedTask = Pick<TaskRow, "datetime" | "duration_minutes">;
 
 export function formatDuration(minutes: number): string {
   if (minutes < 60) return `${minutes} min`;
@@ -25,22 +25,20 @@ export function parseDurationInput(text: string): number | null {
   return minutes >= MIN_DURATION_MINUTES && minutes <= MAX_DURATION_MINUTES ? minutes : null;
 }
 
-// When the event is over. An event with no stored duration ends the moment it
-// starts, which is how every event behaved before durations existed - so
-// nothing changes for them until a duration is set. Only events have
-// durations; a timed task just has a time.
-export function eventEnd(task: TimedTask): Date | null {
+// When a timed event or task is over. One with no stored duration ends the
+// moment it starts, which is how everything behaved before durations existed -
+// so nothing changes for it until a duration is set.
+export function itemEnd(task: TimedTask): Date | null {
   if (!task.datetime) return null;
   const start = new Date(task.datetime);
   if (Number.isNaN(start.getTime())) return null;
-  const minutes = task.type === "event" ? (task.duration_minutes ?? 0) : 0;
-  return new Date(start.getTime() + minutes * 60_000);
+  return new Date(start.getTime() + (task.duration_minutes ?? 0) * 60_000);
 }
 
-// True from an event's start until its end - never for one with no duration.
+// True from an item's start until its end - never for one with no duration.
 export function isInProgress(task: TimedTask, now: Date): boolean {
-  if (task.type !== "event" || !task.duration_minutes) return false;
-  const end = eventEnd(task);
+  if (!task.duration_minutes) return false;
+  const end = itemEnd(task);
   const start = new Date(task.datetime!);
   return end !== null && start <= now && now < end;
 }

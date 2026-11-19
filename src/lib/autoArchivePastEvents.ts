@@ -1,5 +1,5 @@
 import { createNextOccurrence } from "./completeTask";
-import { eventEnd } from "./duration";
+import { itemEnd } from "./duration";
 import { cancelNotification } from "./notifications";
 import { supabase } from "./supabase";
 import type { TaskRow } from "../types/task";
@@ -19,7 +19,7 @@ export async function archivePastEvents(rows: TaskRow[]): Promise<TaskRow[]> {
   // duration ends the moment it starts, as every event did before durations.
   const pastEvents = rows.filter((t) => {
     if (t.type !== "event" || t.is_completed) return false;
-    const end = eventEnd(t);
+    const end = itemEnd(t);
     return end !== null && end < now;
   });
   if (pastEvents.length === 0) return rows;
