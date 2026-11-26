@@ -27,6 +27,7 @@ function makeTask(overrides: Partial<TaskRow> = {}): TaskRow {
     priority: null,
     requires_downtime: false,
     duration_minutes: null,
+    notes: null,
     is_completed: false,
     latitude: null,
     longitude: null,

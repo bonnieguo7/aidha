@@ -4,6 +4,7 @@ import { DurationPicker, EditorActions, FieldRow, SegmentedControl, fieldEditorS
 import DatePickerField from "./DatePickerField";
 import TimePickerField from "./TimePickerField";
 import { formatDuration } from "../lib/duration";
+import { notesPreview } from "../lib/notes";
 import { effectivePriority } from "../lib/priority";
 import { colors } from "../lib/theme";
 import type { ParsedTask, Priority, RecurringFrequency, TaskType } from "../types/task";
@@ -86,6 +87,7 @@ export default function PendingTaskFields({
   const [dateDraft, setDateDraft] = useState(dateParts.date);
   const [timeDraft, setTimeDraft] = useState(dateParts.time);
   const [durationDraft, setDurationDraft] = useState<number | null>(task.duration_minutes);
+  const [notesDraft, setNotesDraft] = useState(task.notes ?? "");
   const [locationDraft, setLocationDraft] = useState(task.location?.raw_text ?? "");
   const [priorityDraft, setPriorityDraft] = useState<Priority | typeof NO_PRIORITY>(
     effectivePriority(task) ?? NO_PRIORITY
@@ -128,6 +130,9 @@ export default function PendingTaskFields({
         break;
       case "duration":
         setDurationDraft(task.duration_minutes);
+        break;
+      case "notes":
+        setNotesDraft(task.notes ?? "");
         break;
       case "location":
         setLocationDraft(task.location?.raw_text ?? "");
@@ -172,6 +177,11 @@ export default function PendingTaskFields({
     if (!dateParts.date) return;
     onChange({ ...task, datetime: datePartsToNaiveIso(dateParts.date, timeDraft) });
     closeField("time");
+  }
+
+  function handleSaveNotes() {
+    onChange({ ...task, notes: notesDraft.trim() || null });
+    closeField("notes");
   }
 
   function handleSaveDuration() {
@@ -361,7 +371,6 @@ export default function PendingTaskFields({
         value={task.recurring ? capitalize(task.recurring.frequency) : "None"}
         expanded={!!expanded.recurrence}
         onToggle={() => toggleField("recurrence")}
-        bordered={false}
       >
         <SegmentedControl
           options={[
@@ -384,6 +393,27 @@ export default function PendingTaskFields({
           />
         )}
         <EditorActions onSave={handleSaveRecurrence} onCancel={() => closeField("recurrence")} saving={false} />
+      </FieldRow>
+
+      <FieldRow
+        icon="document-text-outline"
+        label="Notes"
+        value={notesPreview(task.notes) ?? "Not set"}
+        expanded={!!expanded.notes}
+        onToggle={() => toggleField("notes")}
+        bordered={false}
+      >
+        <TextInput
+          style={[fieldEditorStyles.inlineInput, fieldEditorStyles.notesInput]}
+          value={notesDraft}
+          onChangeText={setNotesDraft}
+          placeholder="Things to bring, a door code, anything to remember"
+          placeholderTextColor={colors.textMuted}
+          multiline
+          autoFocus
+          textAlignVertical="top"
+        />
+        <EditorActions onSave={handleSaveNotes} onCancel={() => closeField("notes")} saving={false} />
       </FieldRow>
     </View>
   );

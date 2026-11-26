@@ -27,6 +27,8 @@ export interface ParsedTask {
   // hours", "5 to 6:30"). Null = unknown; the Day view then draws an event as an
   // hour and a task as half an hour.
   duration_minutes: number | null;
+  // Free-form notes the user adds before saving (the AI doesn't fill these in).
+  notes?: string | null;
 }
 
 // One turn in the parse-task conversation, sent to and echoed back by the Edge Function.
@@ -86,6 +88,8 @@ export interface TaskRow {
   requires_downtime: boolean;
   // Null = no duration set (see ParsedTask.duration_minutes).
   duration_minutes: number | null;
+  // Free-form notes - a packing list, a door code, anything. Null when empty.
+  notes: string | null;
   is_completed: boolean;
   latitude: number | null;
   longitude: number | null;

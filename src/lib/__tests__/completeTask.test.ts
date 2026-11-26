@@ -37,6 +37,7 @@ function makeTask(overrides: Partial<TaskRow> = {}): TaskRow {
     priority: "normal",
     requires_downtime: false,
     duration_minutes: null,
+    notes: null,
     is_completed: false,
     latitude: null,
     longitude: null,
@@ -80,6 +81,14 @@ describe("completeTask", () => {
       date_certainty: "exact",
     });
     expect(new Date(inserted.datetime).getTime()).toBeGreaterThan(Date.now());
+  });
+
+  it("carries the notes over to the next occurrence", async () => {
+    mockUpdateSelect.mockResolvedValue({ data: [{ id: "task-1" }], error: null });
+
+    await completeTask(makeTask({ notes: "Bathing suit\nSunscreen" }));
+
+    expect(mockInsert.mock.calls[0][0].notes).toBe("Bathing suit\nSunscreen");
   });
 
   it("does not create a duplicate when another caller already completed the task", async () => {

@@ -20,7 +20,7 @@ import { isoToLocalNaive, localIsoNow, localNaiveToUtcIso } from "../lib/localDa
 import { getCurrentUserLocation } from "../lib/locationPermission";
 import { openInMaps } from "../lib/maps";
 import { cancelNotification } from "../lib/notifications";
-import { updateDepartureForTask } from "../lib/scheduleDeparture";
+import { refreshLeavingNotification, updateDepartureForTask } from "../lib/scheduleDeparture";
 import { supabase } from "../lib/supabase";
 import { syncDueNotification } from "../lib/syncDueNotification";
 import { colors } from "../lib/theme";
@@ -292,6 +292,7 @@ function EditTaskScreenContent({ route, navigation }: Props) {
   const [dateDraft, setDateDraft] = useState(dateParts.date);
   const [timeDraft, setTimeDraft] = useState(dateParts.time);
   const [durationDraft, setDurationDraft] = useState<number | null>(taskData.duration_minutes);
+  const [notesDraft, setNotesDraft] = useState(taskData.notes ?? "");
   const [typeDraft, setTypeDraft] = useState<TaskType>(taskData.type);
   const [priorityDraft, setPriorityDraft] = useState<Priority | typeof NO_PRIORITY>(
     effectivePriority(taskData) ?? NO_PRIORITY
@@ -373,6 +374,9 @@ function EditTaskScreenContent({ route, navigation }: Props) {
       case "duration":
         setDurationDraft(taskData.duration_minutes);
         break;
+      case "notes":
+        setNotesDraft(taskData.notes ?? "");
+        break;
       case "type":
         setTypeDraft(taskData.type);
         break;
@@ -415,8 +419,20 @@ function EditTaskScreenContent({ route, navigation }: Props) {
     }
     // The reminder's text (title, location) and schedule (time, repeat rule) are
     // fixed when it's scheduled, so any of these means rescheduling it.
-    if (key === "date" || key === "time" || key === "title" || key === "location" || key === "recurrence") {
+    if (
+      key === "date" ||
+      key === "time" ||
+      key === "title" ||
+      key === "location" ||
+      key === "recurrence" ||
+      key === "notes"
+    ) {
       maybeSyncDueNotification(updated);
+    }
+    // Notes appear in the "time to leave" reminder too. Its time doesn't
+    // change, so it's just re-sent with the new text - no travel lookup.
+    if (key === "notes") {
+      maybeRefreshLeavingNotification(updated);
     }
   }
 
@@ -430,6 +446,15 @@ function EditTaskScreenContent({ route, navigation }: Props) {
       setTaskData(updated);
     } catch {
       // Best-effort background recompute - ignore failures.
+    }
+  }
+
+  async function maybeRefreshLeavingNotification(task: TaskRow) {
+    try {
+      const updated = await refreshLeavingNotification(task);
+      setTaskData(updated);
+    } catch {
+      // Best-effort background refresh - ignore failures.
     }
   }
 
@@ -561,6 +586,10 @@ function EditTaskScreenContent({ route, navigation }: Props) {
     } catch (err) {
       setError(err instanceof Error ? err.message : "Invalid time.");
     }
+  }
+
+  function handleSaveNotes() {
+    saveField("notes", { notes: notesDraft.trim() || null });
   }
 
   function handleSaveDuration() {
@@ -1010,6 +1039,35 @@ function EditTaskScreenContent({ route, navigation }: Props) {
           </FieldRow>
         </View>
 
+        <Text style={styles.sectionLabel}>Notes</Text>
+        <View style={styles.detailsCard}>
+          {expanded.notes ? (
+            <View style={styles.notesEditor}>
+              <TextInput
+                style={[styles.inlineInput, styles.notesInput]}
+                value={notesDraft}
+                onChangeText={setNotesDraft}
+                placeholder="Things to bring, a door code, anything to remember"
+                placeholderTextColor={colors.textMuted}
+                multiline
+                autoFocus
+                textAlignVertical="top"
+              />
+              <EditorActions
+                onSave={handleSaveNotes}
+                onCancel={() => closeField("notes")}
+                saving={savingField === "notes"}
+              />
+            </View>
+          ) : (
+            <Pressable onPress={() => toggleField("notes")} style={styles.notesBody}>
+              <Text style={taskData.notes ? styles.notesText : styles.notesPlaceholder}>
+                {taskData.notes || "Add notes - things to bring, a door code, anything"}
+              </Text>
+            </Pressable>
+          )}
+        </View>
+
         {error && <Text style={styles.error}>{error}</Text>}
 
         <Text style={styles.sectionLabel}>Ask AI</Text>
@@ -1137,6 +1195,26 @@ const styles = StyleSheet.create({
   },
   recurrenceDetailInput: {
     marginTop: 10,
+  },
+  notesEditor: {
+    padding: 12,
+  },
+  notesInput: {
+    flex: 0,
+    minHeight: 110,
+  },
+  notesBody: {
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+  },
+  notesText: {
+    fontSize: 15,
+    lineHeight: 21,
+    color: colors.textPrimary,
+  },
+  notesPlaceholder: {
+    fontSize: 15,
+    color: colors.accent,
   },
   segmentedControl: {
     flexDirection: "row",

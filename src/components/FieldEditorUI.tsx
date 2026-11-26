@@ -228,6 +228,11 @@ export const fieldEditorStyles = StyleSheet.create({
   recurrenceDetailInput: {
     marginTop: 10,
   },
+  notesInput: {
+    flex: 0,
+    minHeight: 100,
+    marginTop: 8,
+  },
   segmentedControl: {
     flexDirection: "row",
     flexWrap: "wrap",

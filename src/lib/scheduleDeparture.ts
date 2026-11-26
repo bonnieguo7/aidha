@@ -47,6 +47,20 @@ async function applyPatch(task: TaskRow, patch: Record<string, unknown>): Promis
   return data as TaskRow;
 }
 
+// Reschedules an existing "time to leave" notification at the same time, with the
+// task's current text - for edits that change what the reminder says (its notes)
+// but not when it should fire, so travel time isn't looked up again.
+export async function refreshLeavingNotification(task: TaskRow): Promise<TaskRow> {
+  if (!task.leaving_by) return task;
+  const leavingBy = new Date(task.leaving_by);
+  if (Number.isNaN(leavingBy.getTime())) return task;
+
+  await cancelNotification(task.leaving_notification_id);
+  const notificationId = await scheduleLeavingNotification(task, leavingBy);
+  if (notificationId === task.leaving_notification_id) return task;
+  return applyPatch(task, { leaving_notification_id: notificationId });
+}
+
 // Recomputes (or clears) a task's "leaving by" departure reminder: geocodes the
 // location, estimates travel time, derives leavingBy, and (re)schedules the local
 // notification - never leaving an orphaned one behind. Safe to call after any

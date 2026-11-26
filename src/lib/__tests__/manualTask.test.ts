@@ -69,6 +69,14 @@ describe("finalizeManualTask", () => {
     });
   });
 
+  it("trims notes and stores blank notes as none", () => {
+    expect(finalizeManualTask({ ...createBlankTask(), title: "x", notes: "  Bathing suit\nSunscreen  " }).notes).toBe(
+      "Bathing suit\nSunscreen"
+    );
+    expect(finalizeManualTask({ ...createBlankTask(), title: "x", notes: "   \n " }).notes).toBeNull();
+    expect(finalizeManualTask({ ...createBlankTask(), title: "x" }).notes).toBeNull();
+  });
+
   it("clears AI-only fields", () => {
     const done = finalizeManualTask({ ...createBlankTask(), title: "x", needs_clarification: ["priority"], confirmation_note: "hi" });
     expect(done.needs_clarification).toEqual([]);

@@ -1,6 +1,7 @@
 import { Ionicons } from "@expo/vector-icons";
 import { StyleSheet, Text, View } from "react-native";
 import { formatDuration } from "../lib/duration";
+import { notesPreview } from "../lib/notes";
 import { effectivePriority } from "../lib/priority";
 import { colors } from "../lib/theme";
 import type { ClarificationField, ParsedTask } from "../types/task";
@@ -60,6 +61,7 @@ export default function TaskCard({ task }: { task: ParsedTask }) {
   const priority = effectivePriority(task);
   const showPriority = Boolean(priority) || isFlagged("priority");
   const showRecurrence = Boolean(task.recurring) || isFlagged("recurrence");
+  const notes = notesPreview(task.notes);
 
   return (
     <View style={styles.card}>
@@ -101,6 +103,7 @@ export default function TaskCard({ task }: { task: ParsedTask }) {
           flagged={isFlagged("recurrence")}
         />
       )}
+      {notes && <Row icon="document-text-outline" text={notes} flagged={false} />}
     </View>
   );
 }

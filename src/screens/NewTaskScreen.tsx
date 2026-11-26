@@ -143,6 +143,7 @@ export default function NewTaskScreen() {
         priority: effectivePriority(task),
         requires_downtime: task.requires_downtime,
         duration_minutes: task.duration_minutes,
+        notes: task.notes?.trim() || null,
       })
       .select()
       .single();

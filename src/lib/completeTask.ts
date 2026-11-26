@@ -40,6 +40,7 @@ export async function createNextOccurrence(task: TaskRow): Promise<TaskRow | nul
       priority: task.priority,
       requires_downtime: task.requires_downtime,
       duration_minutes: task.duration_minutes,
+      notes: task.notes,
       latitude: task.latitude,
       longitude: task.longitude,
       resolved_address: task.resolved_address,

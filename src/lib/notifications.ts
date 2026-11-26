@@ -1,5 +1,6 @@
 import * as Notifications from "expo-notifications";
 import type { TaskRow } from "../types/task";
+import { notesPreview } from "./notes";
 import { planRepeatingTriggers, type RepeatingTrigger } from "./recurringTriggers";
 
 // A recurring item's repeating reminder is stored on the task as this marker
@@ -15,6 +16,14 @@ export function recurringMarker(taskId: string): string {
 
 function isRecurringMarker(id: string): boolean {
   return id.startsWith(RECURRING_PREFIX);
+}
+
+// A notification body from its lines (where to go, the notes preview), leaving
+// out the empty ones; undefined when there's nothing to say.
+function reminderBody(task: TaskRow, firstLine: string | null): string | undefined {
+  const preview = notesPreview(task.notes);
+  const lines = [firstLine, preview ? `Notes: ${preview}` : null].filter((line): line is string => Boolean(line));
+  return lines.length > 0 ? lines.join("\n") : undefined;
 }
 
 // Without prompting - for background checks that shouldn't pop a dialog.
@@ -43,15 +52,15 @@ export async function scheduleLeavingNotification(
   const granted = await ensureNotificationPermission();
   if (!granted) return null;
 
-  const body =
+  const where =
     task.location_raw_text && task.travel_duration_minutes != null
       ? `${task.location_raw_text} - about ${task.travel_duration_minutes} min away`
-      : (task.location_raw_text ?? undefined);
+      : task.location_raw_text;
 
   return Notifications.scheduleNotificationAsync({
     content: {
       title: `Time to leave for ${task.title}`,
-      body,
+      body: reminderBody(task, where),
     },
     trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: leavingBy },
   });
@@ -84,7 +93,7 @@ export async function scheduleDueNotification(task: TaskRow): Promise<string | n
   return Notifications.scheduleNotificationAsync({
     content: {
       title: task.title,
-      body: task.location_raw_text ?? undefined,
+      body: reminderBody(task, task.location_raw_text),
     },
     trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: dueDate },
   });
@@ -123,7 +132,7 @@ async function scheduleRecurringDueNotification(task: TaskRow): Promise<string |
       triggers.map((trigger, index) =>
         Notifications.scheduleNotificationAsync({
           identifier: `${marker}:${index}`,
-          content: { title: task.title, body: task.location_raw_text ?? undefined },
+          content: { title: task.title, body: reminderBody(task, task.location_raw_text) },
           trigger: toTriggerInput(trigger),
         })
       )

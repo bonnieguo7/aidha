@@ -16,6 +16,7 @@ export function createBlankTask(): ParsedTask {
     needs_clarification: [],
     confirmation_note: null,
     duration_minutes: null,
+    notes: null,
   };
 }
 
@@ -35,6 +36,7 @@ export function finalizeManualTask(task: ParsedTask): ParsedTask {
     date_certainty: hasDate ? "exact" : "none",
     requires_downtime: !hasDate,
     duration_minutes: hasDate ? task.duration_minutes : null,
+    notes: task.notes?.trim() || null,
     needs_clarification: [],
     confirmation_note: null,
   };

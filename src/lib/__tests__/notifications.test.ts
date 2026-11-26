@@ -3,6 +3,7 @@ import {
   getScheduledRecurringMarkers,
   recurringMarker,
   scheduleDueNotification,
+  scheduleLeavingNotification,
 } from "../notifications";
 import type { TaskRow } from "../../types/task";
 
@@ -142,6 +143,39 @@ describe("scheduleDueNotification", () => {
     expect(id).toBe("generated-id"); // the one-time fallback
     expect(mockCancel).toHaveBeenCalledWith("recurring:task-1:0"); // partial work rolled back
     expect(mockSchedule.mock.calls.at(-1)?.[0].trigger.type).toBe("date");
+  });
+});
+
+describe("notes in reminder text", () => {
+  it("adds a notes line under the location in the 'at the time' reminder", async () => {
+    await scheduleDueNotification(makeTask({ location_raw_text: "Airport", notes: "Bathing suit\nSunscreen" }));
+    expect(mockSchedule.mock.calls[0][0].content.body).toBe("Airport\nNotes: Bathing suit, Sunscreen");
+  });
+
+  it("uses the notes alone when there's no location", async () => {
+    await scheduleDueNotification(makeTask({ notes: "Bathing suit" }));
+    expect(mockSchedule.mock.calls[0][0].content.body).toBe("Notes: Bathing suit");
+  });
+
+  it("leaves the body out when there's neither", async () => {
+    await scheduleDueNotification(makeTask());
+    expect(mockSchedule.mock.calls[0][0].content.body).toBeUndefined();
+  });
+
+  it("includes the notes in a repeating reminder too", async () => {
+    await scheduleDueNotification(makeTask({ recurring_frequency: "daily", notes: "Vitamins" }));
+    expect(mockSchedule.mock.calls[0][0].content.body).toBe("Notes: Vitamins");
+  });
+
+  it("adds the notes under the travel line in the 'time to leave' reminder", async () => {
+    await scheduleLeavingNotification(
+      makeTask({ location_raw_text: "JFK", travel_duration_minutes: 45, notes: "Passport\nCharger" }),
+      inHours(2)
+    );
+    expect(mockSchedule.mock.calls[0][0].content).toEqual({
+      title: "Time to leave for Water plants",
+      body: "JFK - about 45 min away\nNotes: Passport, Charger",
+    });
   });
 });
 

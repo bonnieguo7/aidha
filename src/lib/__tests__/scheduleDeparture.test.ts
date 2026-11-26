@@ -1,4 +1,5 @@
-import { updateDepartureForTask } from "../scheduleDeparture";
+import { refreshLeavingNotification, updateDepartureForTask } from "../scheduleDeparture";
+import { cancelNotification, scheduleLeavingNotification } from "../notifications";
 import type { TaskRow } from "../../types/task";
 
 // The row the fake database holds; applyPatch's update().eq().select().single()
@@ -153,5 +154,35 @@ describe("updateDepartureForTask - Live Activity restart after rescheduling", ()
     const updated = await updateDepartureForTask(task, here);
 
     expect(updated.live_activity_started_at).toBeNull();
+  });
+});
+
+
+describe("refreshLeavingNotification - new notes text, same time", () => {
+  it("re-sends the existing leave-by reminder at the same time and saves the new id", async () => {
+    const leavingBy = new Date(Date.now() + 2 * 3600_000);
+    const task = {
+      ...erroredTask(),
+      leaving_by_error: false,
+      leaving_by: leavingBy.toISOString(),
+      leaving_notification_id: "old-id",
+      notes: "Passport",
+    } as unknown as TaskRow;
+    mockStored = task;
+
+    const updated = await refreshLeavingNotification(task);
+
+    expect(cancelNotification).toHaveBeenCalledWith("old-id");
+    expect(scheduleLeavingNotification).toHaveBeenCalledWith(task, leavingBy);
+    expect(updated.leaving_notification_id).toBe("notif-1");
+    // no travel lookup
+    expect(mockGeocode).not.toHaveBeenCalled();
+    expect(mockRoute).not.toHaveBeenCalled();
+  });
+
+  it("does nothing for a task without a leave-by time", async () => {
+    const task = { ...erroredTask(), leaving_by: null } as unknown as TaskRow;
+    expect(await refreshLeavingNotification(task)).toBe(task);
+    expect(scheduleLeavingNotification).not.toHaveBeenCalled();
   });
 });
