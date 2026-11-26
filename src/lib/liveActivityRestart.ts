@@ -1,12 +1,12 @@
-// The start-live-activities server job starts a Live Activity when a task's
-// leaving_by is 14-15 minutes away, but only for tasks not already stamped with
+// The start-live-activities server job starts a Live Activity once a task's
+// leaving_by is within 15 minutes, but only for tasks not already stamped with
 // live_activity_started_at. Nothing else clears that stamp, so without this a
 // task rescheduled after its Live Activity started would never get another.
 
 // A new leaving_by must be at least this far ahead to be worth clearing the
-// stamp: the server's window is 14-15 minutes out, and the extra minute keeps a
-// time that is just inside the window from starting a second activity on top of
-// the one already showing.
+// stamp: the server starts one for anything within 15 minutes, so clearing the
+// stamp for a time already inside that range would immediately start a second
+// activity on top of the one already showing. The extra minute is a safety margin.
 export const RESTART_MIN_LEAD_MINUTES = 16;
 // Small recalculations (the user's location drifting a few hundred metres) must
 // not restart anything - only a real move of the time does.

@@ -1,6 +1,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.111.0";
 import { SignJWT, importPKCS8 } from "https://esm.sh/jose@5.9.6";
 import { corsHeaders } from "../_shared/cors.ts";
+import { liveActivityWindow } from "../_shared/liveActivityWindow.ts";
 
 // Unlike every other function in this project, this one is never called by
 // the client - it's hit once a minute by a pg_cron job (see the
@@ -19,8 +20,6 @@ const APNS_BUNDLE_ID = Deno.env.get("APNS_BUNDLE_ID");
 // shipped via TestFlight/App Store - see the plan's Risks section.
 const APNS_ENVIRONMENT = Deno.env.get("APNS_ENVIRONMENT") ?? "sandbox";
 
-const RECHECK_WINDOW_START_MINUTES = 14;
-const RECHECK_WINDOW_END_MINUTES = 15;
 
 function jsonResponse(body: unknown, status: number) {
   return new Response(JSON.stringify(body), {
@@ -114,14 +113,13 @@ Deno.serve(async (req) => {
   const supabase = createClient(SUPABASE_URL!, SUPABASE_SERVICE_ROLE_KEY!);
 
   const now = Date.now();
-  const windowStart = new Date(now + RECHECK_WINDOW_START_MINUTES * 60_000).toISOString();
-  const windowEnd = new Date(now + RECHECK_WINDOW_END_MINUTES * 60_000).toISOString();
+  const { from: windowStart, to: windowEnd } = liveActivityWindow(now);
 
   const { data: tasks, error: tasksError } = await supabase
     .from("tasks")
     .select("id, user_id, title, location_raw_text, datetime, leaving_by")
     .gte("leaving_by", windowStart)
-    .lt("leaving_by", windowEnd)
+    .lte("leaving_by", windowEnd)
     .eq("is_completed", false)
     .is("live_activity_started_at", null);
 

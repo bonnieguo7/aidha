@@ -10,7 +10,7 @@ several tasks up front and let them fire while you do other things.
 |---|---|---|
 | **At the time** | At the task's / event's own time | Title = the task title, body = its location (if any) |
 | **Time to leave** | At "leaving by" = event time - travel time - 8 min buffer. Only for items with a **location and a time** | Title "Time to leave for *X*", body "*Place* - about *N* min away" |
-| **Live Activity** | Pushed by the server 14-15 min **before** "leaving by" | Lock-screen / Dynamic Island card with a "LEAVE IN" countdown ring |
+| **Live Activity** | Pushed by the server once "leaving by" is **within 15 min** (checked every minute) | Lock-screen / Dynamic Island card with a "LEAVE IN" countdown ring |
 
 At-the-time and time-to-leave are **local notifications scheduled on the phone**. They fire even if
 the app is closed. The Live Activity comes from a server job that runs once a minute.
@@ -128,18 +128,20 @@ Each needs a task 8+ minutes out so you have time to change it. Create them all 
 
 ## Batch 6: Live Activity (needs S6; about 25 min)
 
-The server starts one when "leaving by" is **14-15 minutes away**. That window is **one minute wide**,
-so a task whose leaving-by is already under 15 min away **will never get one**.
+The server starts one as soon as "leaving by" is **within 15 minutes** (it checks every minute). A task
+created or recalculated closer than 15 minutes still gets one on the next check; the old rule only
+caught a one-minute window and missed those. Each task gets **one**, ever, until it's rescheduled.
 
-Create: event at PLACE for **T+40** (leaving by should land around T+22 to T+27). Check the Leaving by time in the edit screen and write it down: ____. Then **lock the phone and don't reopen Aidha.** (Reopening within 90 min of the event recalculates leaving by from your current location and can move it out of the window.)
+Create: event at PLACE for **T+40** (leaving by should land around T+22 to T+27). Check the Leaving by time in the edit screen and write it down: ____. Then **lock the phone** and wait. (Reopening within 90 min of the event recalculates leaving by from your current location, so the Live Activity may start a little earlier or later than you computed. That's fine.)
 
 | ID | What to check | Expected | Result |
 |---|---|---|---|
-| **6.1** | At leaving by **minus about 15 min** | A **Live Activity** appears (lock screen / Dynamic Island): event title, place, "*time* - depart *time*", and a **LEAVE IN** ring counting down. Plus an alert "Time to leave soon" | ☐ |
+| **6.1** | At leaving by **minus about 15 min** (within a minute or so) | A **Live Activity** appears (lock screen / Dynamic Island): event title, place, "*time* - depart *time*", and a **LEAVE IN** ring counting down. Plus an alert "Time to leave soon" | ☐ |
 | **6.2** | The next few minutes | **One** Live Activity only, no duplicates (it's marked started in the database) | ☐ |
 | **6.3** | At leaving by | The normal "Time to leave for..." notification | ☐ |
 | **6.4** | **Reschedule:** after 6.1, move that event **at least an hour later** and wait for the new window (new leaving by minus about 15 min) | A **second Live Activity** appears for the new time. *Expected side effect:* the first one is not updated or ended, so it may still sit on the lock screen counting down to the old time until iOS removes it. Moving the time by under 5 minutes, or to a time already within 15 minutes, correctly does **not** start another | ☐ |
-| **6.5** | Nothing appears at all | Check (a) the `device_push_tokens` row, (b) Settings -> Live Activities on, (c) that you waited for the 14-15 minute window and didn't open the app | ☐ |
+| **6.5** | **Late creation:** create an event at PLACE for **T+20** (so leaving by is already under 15 min away) | A Live Activity appears **within about a minute**, not never | ☐ |
+| **6.6** | Nothing appears at all | Check (a) the item has a **Leaving by** time (not "Unable to calculate"), (b) the `device_push_tokens` row exists, (c) Settings -> Live Activities is on, (d) you're on the **dev** build, not TestFlight (the server currently sends to Apple's sandbox) | ☐ |
 
 ---
 
