@@ -6,7 +6,7 @@ import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View
 import HabitFields from "../components/HabitFields";
 import { useAccomplishments } from "../lib/AccomplishmentsContext";
 import { refreshHabitReminders } from "../lib/habitReminders";
-import { cadenceLabel, periodPhrase, progressLabel, streakLabel } from "../lib/habits";
+import { cadenceLabel, latestCheckinThisPeriod, periodPhrase, progressLabel, streakLabel } from "../lib/habits";
 import { addCheckin, archiveHabit, fetchHabitCheckins, removeCheckin, updateHabit } from "../lib/habitsApi";
 import { statusesFor } from "../lib/useHabits";
 import { colors } from "../lib/theme";
@@ -83,23 +83,35 @@ export default function HabitDetailScreen({ route, navigation }: Props) {
     refreshHabitReminders();
   }
 
+  // Removes a check-in and updates everything that depends on it.
+  async function removeAndUpdate(checkin: HabitCheckin) {
+    const removeError = await removeCheckin(checkin.id);
+    if (removeError) {
+      Alert.alert("Couldn't remove it", removeError);
+      return;
+    }
+    loadId.current += 1;
+    setCheckins((prev) => (prev ?? []).filter((c) => c.id !== checkin.id));
+    recordCheckinRemoved();
+    refreshHabitReminders();
+  }
+
+  // For a mis-tap: takes back this period's latest check-in straight away.
+  async function handleUndoLast() {
+    const latest = checkins ? latestCheckinThisPeriod(habit.cadence, checkins, new Date()) : null;
+    if (!latest || isCheckingIn) return;
+    setIsCheckingIn(true);
+    await removeAndUpdate(latest);
+    setIsCheckingIn(false);
+  }
+
   function handleRemoveCheckin(checkin: HabitCheckin) {
     Alert.alert("Remove this check-in?", formatCheckin(checkin.completed_at), [
       { text: "Cancel", style: "cancel" },
       {
         text: "Remove",
         style: "destructive",
-        onPress: async () => {
-          const removeError = await removeCheckin(checkin.id);
-          if (removeError) {
-            Alert.alert("Couldn't remove it", removeError);
-            return;
-          }
-          loadId.current += 1;
-          setCheckins((prev) => (prev ?? []).filter((c) => c.id !== checkin.id));
-          recordCheckinRemoved();
-          refreshHabitReminders();
-        },
+        onPress: () => removeAndUpdate(checkin),
       },
     ]);
   }
@@ -180,6 +192,18 @@ export default function HabitDetailScreen({ route, navigation }: Props) {
                 </>
               )}
             </Pressable>
+            {progress.done > 0 && (
+              <Pressable
+                onPress={handleUndoLast}
+                disabled={isCheckingIn}
+                hitSlop={8}
+                style={styles.undoButton}
+                accessibilityRole="button"
+              >
+                <Ionicons name="arrow-undo-outline" size={15} color={colors.textSecondary} />
+                <Text style={styles.undoText}>{progress.met ? "Uncheck" : "Undo last check-in"}</Text>
+              </Pressable>
+            )}
           </>
         )}
       </View>
@@ -275,6 +299,18 @@ const styles = StyleSheet.create({
   },
   checkInButtonDone: {
     backgroundColor: colors.successSoft,
+  },
+  undoButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    marginTop: 12,
+  },
+  undoText: {
+    fontSize: 14,
+    color: colors.textSecondary,
+    fontWeight: "600",
   },
   checkInText: {
     color: colors.onSurfaceInverse,

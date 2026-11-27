@@ -1,8 +1,9 @@
 import { Ionicons } from "@expo/vector-icons";
-import { useLayoutEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import {
   ActivityIndicator,
+  Keyboard,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -13,19 +14,21 @@ import {
   View,
 } from "react-native";
 import { confirmDelete } from "../lib/confirmDelete";
-import { formatDuration } from "../lib/duration";
+import { DURATION_PRESETS, formatDuration } from "../lib/duration";
 import { leavingByDetails } from "../lib/leavingByDetails";
 import { effectivePriority } from "../lib/priority";
 import { isoToLocalNaive, localIsoNow, localNaiveToUtcIso } from "../lib/localDatetime";
 import { getCurrentUserLocation } from "../lib/locationPermission";
 import { openInMaps } from "../lib/maps";
+import { parseDayOfMonth, parseWeekdays } from "../lib/recurrence";
+import { describeRecurrence, WEEK_ORDER, weeklyDays, weeklyDetail } from "../lib/recurrenceLabel";
 import { cancelNotification } from "../lib/notifications";
 import { refreshLeavingNotification, updateDepartureForTask } from "../lib/scheduleDeparture";
 import { supabase } from "../lib/supabase";
 import { syncDueNotification } from "../lib/syncDueNotification";
 import { colors } from "../lib/theme";
 import DatePickerField from "../components/DatePickerField";
-import { DurationPicker } from "../components/FieldEditorUI";
+import { DurationPicker, EditorActions, SegmentedControl } from "../components/FieldEditorUI";
 import TimePickerField from "../components/TimePickerField";
 import type { TasksStackParamList } from "../navigation/types";
 import type {
@@ -42,6 +45,10 @@ type Props = NativeStackScreenProps<TasksStackParamList, "EditTask">;
 
 const NO_RECURRENCE = "none" as const;
 const NO_PRIORITY = "none" as const;
+// What a new date & time starts on.
+const DEFAULT_TIME = "09:00";
+const PRESET_MINUTES: readonly number[] = DURATION_PRESETS;
+const WEEKDAY_LABELS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
 function pad(n: number): string {
   return n.toString().padStart(2, "0");
@@ -104,10 +111,6 @@ function formatTimeDisplay(iso: string | null): string {
   return d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
 }
 
-function capitalize(s: string): string {
-  return s.charAt(0).toUpperCase() + s.slice(1);
-}
-
 function formatFullDatetime(iso: string | null): string {
   if (!iso) return "cleared";
   return `${formatDateDisplay(iso)} at ${formatTimeDisplay(iso)}`;
@@ -150,60 +153,6 @@ function describeChange(before: TaskRow, after: TaskRow): string | null {
 
   if (parts.length === 0) return null;
   return `The user just changed: ${parts.join(", ")}.`;
-}
-
-function SegmentedControl<T extends string>({
-  options,
-  value,
-  onChange,
-}: {
-  options: { label: string; value: T }[];
-  value: T;
-  onChange: (value: T) => void;
-}) {
-  return (
-    <View style={styles.segmentedControl}>
-      {options.map((option) => {
-        const selected = option.value === value;
-        return (
-          <Pressable
-            key={option.value}
-            onPress={() => onChange(option.value)}
-            style={[styles.segment, selected && styles.segmentSelected]}
-          >
-            <Text style={[styles.segmentText, selected && styles.segmentTextSelected]}>
-              {option.label}
-            </Text>
-          </Pressable>
-        );
-      })}
-    </View>
-  );
-}
-
-function EditorActions({
-  onSave,
-  onCancel,
-  saving,
-}: {
-  onSave: () => void;
-  onCancel: () => void;
-  saving: boolean;
-}) {
-  return (
-    <View style={styles.editorActionsRow}>
-      <Pressable onPress={onSave} disabled={saving} style={[styles.saveChip, saving && styles.buttonDisabled]}>
-        {saving ? (
-          <ActivityIndicator color={colors.onSurfaceInverse} size="small" />
-        ) : (
-          <Text style={styles.saveChipText}>Save</Text>
-        )}
-      </Pressable>
-      <Pressable onPress={onCancel} disabled={saving} hitSlop={8}>
-        <Text style={styles.cancelLink}>Cancel</Text>
-      </Pressable>
-    </View>
-  );
 }
 
 function FieldRow({
@@ -280,32 +229,45 @@ export default function EditTaskScreen(props: Props) {
 
 function EditTaskScreenContent({ route, navigation }: Props) {
   const [taskData, setTaskData] = useState<TaskRow>(route.params.task);
+  // Which tap-to-open editors are open: "when" (date & time) and "duration"
+  // (a custom length). Everything else edits in place.
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [savingField, setSavingField] = useState<string | null>(null);
+  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved">("idle");
+  const savedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isSettingUpDeparture, setIsSettingUpDeparture] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const dateParts = isoToDateParts(taskData.datetime);
+  // Typed fields keep a draft while they're being edited and save when the
+  // user leaves the field (or the screen).
   const [titleDraft, setTitleDraft] = useState(taskData.title);
   const [locationDraft, setLocationDraft] = useState(taskData.location_raw_text ?? "");
+  const [notesDraft, setNotesDraft] = useState(taskData.notes ?? "");
+  const [focusedField, setFocusedField] = useState<string | null>(null);
+
+  const dateParts = isoToDateParts(taskData.datetime);
   const [dateDraft, setDateDraft] = useState(dateParts.date);
   const [timeDraft, setTimeDraft] = useState(dateParts.time);
   const [durationDraft, setDurationDraft] = useState<number | null>(taskData.duration_minutes);
-  const [notesDraft, setNotesDraft] = useState(taskData.notes ?? "");
-  const [typeDraft, setTypeDraft] = useState<TaskType>(taskData.type);
-  const [priorityDraft, setPriorityDraft] = useState<Priority | typeof NO_PRIORITY>(
-    effectivePriority(taskData) ?? NO_PRIORITY
-  );
-  const [recurrenceFrequencyDraft, setRecurrenceFrequencyDraft] = useState<
-    RecurringFrequency | typeof NO_RECURRENCE
-  >(taskData.recurring_frequency ?? NO_RECURRENCE);
-  const [recurrenceDetailDraft, setRecurrenceDetailDraft] = useState(taskData.recurring_detail ?? "");
 
   const [askMessages, setAskMessages] = useState<ConversationTurn[]>([]);
   const [askDraft, setAskDraft] = useState("");
   const [isAsking, setIsAsking] = useState(false);
   const [askError, setAskError] = useState<string | null>(null);
+
+  // When the task changes from elsewhere (Ask AI, the automatic title update),
+  // show the new values in any field the user isn't typing in.
+  useEffect(() => {
+    if (focusedField !== "title") setTitleDraft(taskData.title);
+    if (focusedField !== "location") setLocationDraft(taskData.location_raw_text ?? "");
+    if (focusedField !== "notes") setNotesDraft(taskData.notes ?? "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [taskData.title, taskData.location_raw_text, taskData.notes]);
+
+  useEffect(() => () => {
+    if (savedTimer.current) clearTimeout(savedTimer.current);
+  }, []);
 
   async function handleDelete() {
     const confirmed = await confirmDelete(`Delete "${taskData.title}"? This can't be undone.`);
@@ -323,25 +285,37 @@ function EditTaskScreenContent({ route, navigation }: Props) {
       return;
     }
 
+    deletedRef.current = true;
     navigation.goBack();
   }
 
   useLayoutEffect(() => {
     navigation.setOptions({
-      title: "Edit task",
-      headerBackTitle: "Tasks",
+      title: taskData.type === "event" ? "Event" : "Task",
+      headerBackTitle: "Back",
       headerRight: () => (
-        <Pressable onPress={handleDelete} disabled={isDeleting} hitSlop={8}>
-          {isDeleting ? (
-            <ActivityIndicator size="small" color={colors.danger} />
-          ) : (
-            <Ionicons name="trash-outline" size={20} color={colors.danger} />
+        <View style={styles.headerActions}>
+          {saveStatus !== "idle" && (
+            <Text style={styles.saveStatus}>{saveStatus === "saving" ? "Saving…" : "Saved"}</Text>
           )}
-        </Pressable>
+          <Pressable
+            onPress={handleDelete}
+            disabled={isDeleting}
+            hitSlop={8}
+            accessibilityRole="button"
+            accessibilityLabel="Delete"
+          >
+            {isDeleting ? (
+              <ActivityIndicator size="small" color={colors.danger} />
+            ) : (
+              <Ionicons name="trash-outline" size={20} color={colors.danger} />
+            )}
+          </Pressable>
+        </View>
       ),
       // eslint-disable-next-line react-hooks/exhaustive-deps
     });
-  }, [navigation, isDeleting, taskData.id, taskData.title]);
+  }, [navigation, isDeleting, taskData.id, taskData.title, taskData.type, saveStatus]);
 
   function toggleField(key: string) {
     setExpanded((prev) => {
@@ -357,42 +331,21 @@ function EditTaskScreenContent({ route, navigation }: Props) {
 
   function resetDraft(key: string) {
     const parts = isoToDateParts(taskData.datetime);
-    switch (key) {
-      case "title":
-        setTitleDraft(taskData.title);
-        break;
-      case "location":
-        setLocationDraft(taskData.location_raw_text ?? "");
-        break;
-      case "date":
-        setDateDraft(parts.date || todayIso());
-        setTimeDraft(parts.time);
-        break;
-      case "time":
-        setTimeDraft(parts.time);
-        break;
-      case "duration":
-        setDurationDraft(taskData.duration_minutes);
-        break;
-      case "notes":
-        setNotesDraft(taskData.notes ?? "");
-        break;
-      case "type":
-        setTypeDraft(taskData.type);
-        break;
-      case "priority":
-        setPriorityDraft(effectivePriority(taskData) ?? NO_PRIORITY);
-        break;
-      case "recurrence":
-        setRecurrenceFrequencyDraft(taskData.recurring_frequency ?? NO_RECURRENCE);
-        setRecurrenceDetailDraft(taskData.recurring_detail ?? "");
-        break;
+    if (key === "when") {
+      setDateDraft(parts.date || todayIso());
+      setTimeDraft(parts.time || DEFAULT_TIME);
+    } else if (key === "duration") {
+      setDurationDraft(taskData.duration_minutes);
     }
   }
 
-  async function saveField(key: string, patch: Record<string, unknown>) {
+  // Writes one change and runs whatever it affects (reminders, travel time,
+  // the title). Every control on the screen saves through here.
+  async function saveField(key: string, patch: Record<string, unknown>): Promise<boolean> {
     setError(null);
     setSavingField(key);
+    setSaveStatus("saving");
+    if (savedTimer.current) clearTimeout(savedTimer.current);
     const previous = taskData;
     const { data, error: updateError } = await supabase
       .from("tasks")
@@ -403,9 +356,12 @@ function EditTaskScreenContent({ route, navigation }: Props) {
     setSavingField(null);
 
     if (updateError) {
+      setSaveStatus("idle");
       setError(updateError.message);
-      return;
+      return false;
     }
+    setSaveStatus("saved");
+    savedTimer.current = setTimeout(() => setSaveStatus("idle"), 1500);
 
     const updated = data as TaskRow;
     setTaskData(updated);
@@ -414,19 +370,12 @@ function EditTaskScreenContent({ route, navigation }: Props) {
     if (key !== "title") {
       syncTitleIfNeeded(previous, updated);
     }
-    if (key === "location" || key === "date" || key === "time") {
+    if (key === "location" || key === "date") {
       maybeUpdateDeparture(updated);
     }
     // The reminder's text (title, location) and schedule (time, repeat rule) are
     // fixed when it's scheduled, so any of these means rescheduling it.
-    if (
-      key === "date" ||
-      key === "time" ||
-      key === "title" ||
-      key === "location" ||
-      key === "recurrence" ||
-      key === "notes"
-    ) {
+    if (key === "date" || key === "title" || key === "location" || key === "recurrence" || key === "notes") {
       maybeSyncDueNotification(updated);
     }
     // Notes appear in the "time to leave" reminder too. Its time doesn't
@@ -434,6 +383,7 @@ function EditTaskScreenContent({ route, navigation }: Props) {
     if (key === "notes") {
       maybeRefreshLeavingNotification(updated);
     }
+    return true;
   }
 
   // Reschedules (or clears) the "at the scheduled time" notification in the
@@ -448,7 +398,6 @@ function EditTaskScreenContent({ route, navigation }: Props) {
       // Best-effort background recompute - ignore failures.
     }
   }
-
   async function maybeRefreshLeavingNotification(task: TaskRow) {
     try {
       const updated = await refreshLeavingNotification(task);
@@ -457,7 +406,6 @@ function EditTaskScreenContent({ route, navigation }: Props) {
       // Best-effort background refresh - ignore failures.
     }
   }
-
   // Recomputes (or clears) the departure reminder in the background after a manual
   // edit touches location or date/time. No loading state or error surfaced here -
   // same reasoning as syncTitleIfNeeded, this is a nicety layered on top of an edit
@@ -472,7 +420,6 @@ function EditTaskScreenContent({ route, navigation }: Props) {
       // Best-effort background recompute - ignore failures.
     }
   }
-
   // Explicit, user-initiated retry for a task that has a location and a time
   // but never got a "leaving by" set up at all - typically because location
   // access wasn't available at save time (see NewTaskScreen), which fails
@@ -507,7 +454,6 @@ function EditTaskScreenContent({ route, navigation }: Props) {
       setError("Still unable to calculate. The maps service may be having trouble - try again in a minute.");
     }
   }
-
   // Runs after any manual (non-title) field save. Silently asks the model whether the
   // title is now stale given what changed, and applies just the title if so - no
   // loading state or error surfaced here, since this is a background nicety, not a
@@ -547,90 +493,6 @@ function EditTaskScreenContent({ route, navigation }: Props) {
       // the user already successfully made.
     }
   }
-
-  function handleSaveTitle() {
-    if (!titleDraft.trim()) {
-      setError("Title can't be empty.");
-      return;
-    }
-    saveField("title", { title: titleDraft.trim() });
-  }
-
-  function handleSaveLocation() {
-    const raw = locationDraft.trim();
-    saveField("location", {
-      location_raw_text: raw ? raw : null,
-      location_place_type: raw ? taskData.location_place_type ?? "none" : null,
-    });
-  }
-
-  function handleSaveDate() {
-    try {
-      const parts = isoToDateParts(taskData.datetime);
-      const nextDatetime = datePartsToIso(dateDraft, parts.time || "00:00");
-      saveField("date", { datetime: nextDatetime });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Invalid date.");
-    }
-  }
-
-  function handleSaveTime() {
-    const parts = isoToDateParts(taskData.datetime);
-    if (!parts.date) {
-      setError("Set a date first.");
-      return;
-    }
-    try {
-      const nextDatetime = datePartsToIso(parts.date, timeDraft);
-      saveField("time", { datetime: nextDatetime });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Invalid time.");
-    }
-  }
-
-  function handleSaveNotes() {
-    saveField("notes", { notes: notesDraft.trim() || null });
-  }
-
-  function handleSaveDuration() {
-    saveField("duration", { duration_minutes: durationDraft });
-  }
-
-  function handleSaveType() {
-    saveField("type", { type: typeDraft });
-  }
-
-  // For a task with no deadline at all (date_certainty "none") - gives it one
-  // via the structured editor instead of that only being possible through
-  // "Ask AI". Deliberately doesn't touch requires_downtime: a task that was
-  // flexible stays flexible (still surfaces in "When you have time") even
-  // once it also has a reminder time - same reasoning as the booking-ahead
-  // case, where a computed reminder date coexists with requires_downtime.
-  function handleAddReminder() {
-    if (!dateDraft.trim()) {
-      setError("Enter a date for the reminder.");
-      return;
-    }
-    try {
-      const nextDatetime = datePartsToIso(dateDraft, timeDraft || "09:00");
-      saveField("date", { datetime: nextDatetime, date_certainty: "exact" });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Invalid date or time.");
-    }
-  }
-
-  function handleSavePriority() {
-    saveField("priority", { priority: priorityDraft === NO_PRIORITY ? null : priorityDraft });
-  }
-
-  function handleSaveRecurrence() {
-    saveField("recurrence", {
-      recurring_frequency: recurrenceFrequencyDraft === NO_RECURRENCE ? null : recurrenceFrequencyDraft,
-      recurring_detail:
-        recurrenceFrequencyDraft === NO_RECURRENCE ? null : recurrenceDetailDraft.trim() || null,
-    });
-  }
-
   function buildAiTaskPayload(t: TaskRow) {
     return {
       type: t.type,
@@ -648,7 +510,6 @@ function EditTaskScreenContent({ route, navigation }: Props) {
       duration_minutes: t.duration_minutes,
     };
   }
-
   async function applyAiPatch(patch: TaskPatch) {
     const dbPatch: Record<string, unknown> = {};
     if (patch.type !== undefined) dbPatch.type = patch.type;
@@ -699,7 +560,6 @@ function EditTaskScreenContent({ route, navigation }: Props) {
       maybeSyncDueNotification(updated);
     }
   }
-
   async function handleAskSend() {
     if (!askDraft.trim()) return;
     const nextMessages: ConversationTurn[] = [...askMessages, { role: "user", content: askDraft.trim() }];
@@ -734,7 +594,113 @@ function EditTaskScreenContent({ route, navigation }: Props) {
     }
   }
 
-  const showDateTimeRows = taskData.date_certainty !== "none";
+  // --- Typed fields: saved when the user leaves them -----------------------
+
+  function commitTitle() {
+    const next = titleDraft.trim();
+    if (!next) {
+      setTitleDraft(taskData.title);
+      return;
+    }
+    if (next !== taskData.title) saveField("title", { title: next });
+  }
+
+  function commitLocation() {
+    const raw = locationDraft.trim();
+    if (raw === (taskData.location_raw_text ?? "")) return;
+    saveField("location", {
+      location_raw_text: raw ? raw : null,
+      location_place_type: raw ? taskData.location_place_type ?? "none" : null,
+    });
+  }
+
+  function commitNotes() {
+    const next = notesDraft.trim() || null;
+    if (next !== taskData.notes) saveField("notes", { notes: next });
+  }
+
+  // Leaving the screen while still typing saves what was typed, the same as
+  // tapping away from the field would. Skipped after a delete.
+  const deletedRef = useRef(false);
+  const commitAllRef = useRef(() => {});
+  commitAllRef.current = () => {
+    if (deletedRef.current) return;
+    commitTitle();
+    commitLocation();
+    commitNotes();
+  };
+  useEffect(() => navigation.addListener("beforeRemove", () => commitAllRef.current()), [navigation]);
+
+  // --- Choices: saved the moment one is tapped ------------------------------
+
+  function chooseType(type: TaskType) {
+    if (type !== taskData.type) saveField("type", { type });
+  }
+
+  function choosePriority(priority: Priority | typeof NO_PRIORITY) {
+    const next = priority === NO_PRIORITY ? null : priority;
+    if (next !== taskData.priority) saveField("priority", { priority: next });
+  }
+
+  function chooseDuration(minutes: number | null) {
+    if (minutes !== taskData.duration_minutes) saveField("duration", { duration_minutes: minutes });
+  }
+
+  function chooseRepeat(choice: RecurringFrequency | typeof NO_RECURRENCE) {
+    const frequency = choice === NO_RECURRENCE ? null : choice;
+    if (frequency === taskData.recurring_frequency) return;
+    // Keep the existing day(s) when they still mean something for the new
+    // frequency; otherwise the date itself decides.
+    const detail =
+      frequency === "weekly" && parseWeekdays(taskData.recurring_detail).size > 0
+        ? taskData.recurring_detail
+        : frequency === "monthly" && parseDayOfMonth(taskData.recurring_detail)
+          ? taskData.recurring_detail
+          : null;
+    saveField("recurrence", { recurring_frequency: frequency, recurring_detail: detail });
+  }
+
+  function toggleWeekday(day: number) {
+    const current = weeklyDays(taskData.recurring_detail, taskData.datetime ? new Date(taskData.datetime) : null);
+    const next = current.includes(day) ? current.filter((d) => d !== day) : [...current, day];
+    // A weekly repeat needs at least one day.
+    if (next.length === 0) return;
+    saveField("recurrence", { recurring_detail: weeklyDetail(next) });
+  }
+
+  // --- Date & time ----------------------------------------------------------
+
+  // One Save for both. Adding a date to an undated task deliberately doesn't
+  // touch requires_downtime: a flexible task stays flexible (still in "When you
+  // have time") even once it also has a reminder time.
+  async function handleSaveWhen() {
+    if (!dateDraft.trim()) {
+      setError("Pick a date first.");
+      return;
+    }
+    let datetime: string | null;
+    try {
+      datetime = datePartsToIso(dateDraft, timeDraft || DEFAULT_TIME);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Invalid date or time.");
+      return;
+    }
+    if (await saveField("date", { datetime, date_certainty: "exact" })) closeField("when");
+  }
+
+  // Back to "whenever": it then shows under "When you have time" on Today.
+  async function handleRemoveDate() {
+    if (await saveField("date", { datetime: null, date_certainty: "none", requires_downtime: true })) {
+      closeField("when");
+    }
+  }
+
+  const hasDate = Boolean(taskData.datetime);
+  const anchor = taskData.datetime ? new Date(taskData.datetime) : null;
+  const priorityValue = effectivePriority(taskData) ?? NO_PRIORITY;
+  const durationIsPreset =
+    taskData.duration_minutes === null || PRESET_MINUTES.includes(taskData.duration_minutes);
+  const busy = (key: string) => savingField === key;
 
   return (
     <KeyboardAvoidingView
@@ -743,213 +709,200 @@ function EditTaskScreenContent({ route, navigation }: Props) {
       keyboardVerticalOffset={Platform.OS === "ios" ? 90 : 0}
     >
       <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-        <Text style={styles.sectionLabel}>Task</Text>
-        <Pressable onPress={() => toggleField("title")}>
-          <Text style={styles.taskTitle}>{taskData.title}</Text>
-        </Pressable>
-        {expanded.title && (
-          <View style={styles.inlineEditorRow}>
-            <TextInput
-              style={styles.inlineInput}
-              value={titleDraft}
-              onChangeText={setTitleDraft}
-              autoFocus
-            />
-            <Pressable
-              onPress={handleSaveTitle}
-              disabled={savingField === "title"}
-              style={[styles.saveChip, savingField === "title" && styles.buttonDisabled]}
-            >
-              {savingField === "title" ? (
-                <ActivityIndicator color={colors.onSurfaceInverse} size="small" />
-              ) : (
-                <Text style={styles.saveChipText}>Save</Text>
-              )}
-            </Pressable>
-            <Pressable onPress={() => closeField("title")} disabled={savingField === "title"} hitSlop={8}>
-              <Text style={styles.cancelLink}>Cancel</Text>
-            </Pressable>
-          </View>
-        )}
+        <TextInput
+          style={styles.titleInput}
+          value={titleDraft}
+          onChangeText={setTitleDraft}
+          onFocus={() => setFocusedField("title")}
+          onBlur={() => {
+            setFocusedField(null);
+            commitTitle();
+          }}
+          onSubmitEditing={() => Keyboard.dismiss()}
+          blurOnSubmit
+          returnKeyType="done"
+          multiline
+          accessibilityLabel="Title"
+        />
+        <View style={styles.typeRow}>
+          <SegmentedControl
+            options={[
+              { label: "Task", value: "task" as TaskType },
+              { label: "Event", value: "event" as TaskType },
+            ]}
+            value={taskData.type}
+            onChange={chooseType}
+          />
+        </View>
 
-        <Text style={styles.sectionLabel}>Details</Text>
-        <View style={styles.detailsCard}>
+        <Text style={styles.sectionLabel}>When</Text>
+        <View style={styles.card}>
           <FieldRow
-            icon="layers-outline"
-            label="Type"
-            value={capitalize(taskData.type)}
-            expanded={!!expanded.type}
-            onToggle={() => toggleField("type")}
+            icon={hasDate ? "calendar-outline" : "alarm-outline"}
+            label="Date & time"
+            value={hasDate ? `${formatDateDisplay(taskData.datetime)} · ${formatTimeDisplay(taskData.datetime)}` : "None - tap to add"}
+            valueColor={hasDate ? undefined : colors.accent}
+            expanded={!!expanded.when}
+            onToggle={() => toggleField("when")}
+          >
+            <DatePickerField value={dateDraft} onChange={setDateDraft} />
+            <TimePickerField value={timeDraft} onChange={setTimeDraft} />
+            <View style={styles.editorFooter}>
+              <EditorActions onSave={handleSaveWhen} onCancel={() => closeField("when")} saving={busy("date")} />
+              {hasDate && (
+                <Pressable onPress={handleRemoveDate} disabled={busy("date")} hitSlop={8}>
+                  <Text style={styles.removeLink}>Remove date</Text>
+                </Pressable>
+              )}
+            </View>
+          </FieldRow>
+
+          {hasDate && (
+            <ChoiceRow icon="hourglass-outline" label="Duration">
+              <SegmentedControl
+                compact
+                options={[
+                  { label: "None", value: "none" },
+                  ...DURATION_PRESETS.map((m) => ({ label: formatDuration(m), value: String(m) })),
+                  {
+                    label: durationIsPreset ? "Other…" : formatDuration(taskData.duration_minutes!),
+                    value: "other",
+                  },
+                ]}
+                value={
+                  expanded.duration || !durationIsPreset
+                    ? "other"
+                    : taskData.duration_minutes === null
+                      ? "none"
+                      : String(taskData.duration_minutes)
+                }
+                onChange={(choice) => {
+                  if (choice === "other") {
+                    toggleField("duration");
+                    return;
+                  }
+                  closeField("duration");
+                  chooseDuration(choice === "none" ? null : Number(choice));
+                }}
+              />
+              {expanded.duration && (
+                <View style={styles.subEditor}>
+                  <DurationPicker value={durationDraft} onChange={setDurationDraft} />
+                  <EditorActions
+                    onSave={() => chooseDuration(durationDraft)}
+                    onCancel={() => closeField("duration")}
+                    saving={busy("duration")}
+                  />
+                </View>
+              )}
+            </ChoiceRow>
+          )}
+
+          <ChoiceRow
+            icon="repeat-outline"
+            label="Repeats"
+            summary={taskData.recurring_frequency ? describeRecurrence(taskData.recurring_frequency, taskData.recurring_detail, anchor) : undefined}
+            last
           >
             <SegmentedControl
+              compact
               options={[
-                { label: "Task", value: "task" as TaskType },
-                { label: "Event", value: "event" as TaskType },
+                { label: "Never", value: NO_RECURRENCE },
+                { label: "Daily", value: "daily" as RecurringFrequency },
+                { label: "Weekly", value: "weekly" as RecurringFrequency },
+                { label: "Monthly", value: "monthly" as RecurringFrequency },
+                { label: "Yearly", value: "yearly" as RecurringFrequency },
               ]}
-              value={typeDraft}
-              onChange={setTypeDraft}
+              value={taskData.recurring_frequency ?? NO_RECURRENCE}
+              onChange={chooseRepeat}
             />
-            <EditorActions onSave={handleSaveType} onCancel={() => closeField("type")} saving={savingField === "type"} />
-          </FieldRow>
+            {taskData.recurring_frequency === "weekly" && (
+              <View style={styles.weekdays}>
+                {WEEK_ORDER.map((day) => {
+                  const selected = weeklyDays(taskData.recurring_detail, anchor).includes(day);
+                  return (
+                    <Pressable
+                      key={day}
+                      onPress={() => toggleWeekday(day)}
+                      disabled={busy("recurrence")}
+                      style={[styles.weekday, selected && styles.weekdaySelected]}
+                      accessibilityRole="checkbox"
+                      accessibilityState={{ checked: selected }}
+                      accessibilityLabel={WEEKDAY_LABELS[day]}
+                    >
+                      <Text style={[styles.weekdayText, selected && styles.weekdayTextSelected]}>
+                        {WEEKDAY_LABELS[day].charAt(0)}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            )}
+          </ChoiceRow>
+        </View>
 
-          {!showDateTimeRows && (
-            <FieldRow
-              icon="alarm-outline"
-              label="Reminder"
-              value="Not set - tap to add"
-              valueColor={colors.accent}
-              expanded={!!expanded.date}
-              onToggle={() => toggleField("date")}
-            >
-              <DatePickerField value={dateDraft} onChange={setDateDraft} />
-              <TimePickerField value={timeDraft} onChange={setTimeDraft} />
-              <EditorActions
-                onSave={handleAddReminder}
-                onCancel={() => closeField("date")}
-                saving={savingField === "date"}
-              />
-            </FieldRow>
-          )}
-
-          {showDateTimeRows && (
-            <FieldRow
-              icon="calendar-outline"
-              label="Date"
-              value={formatDateDisplay(taskData.datetime)}
-              expanded={!!expanded.date}
-              onToggle={() => toggleField("date")}
-            >
-              <DatePickerField value={dateDraft} onChange={setDateDraft} />
-              <EditorActions
-                onSave={handleSaveDate}
-                onCancel={() => closeField("date")}
-                saving={savingField === "date"}
-              />
-            </FieldRow>
-          )}
-
-          {showDateTimeRows && (
-            <FieldRow
-              icon="time-outline"
-              label="Time"
-              value={formatTimeDisplay(taskData.datetime)}
-              expanded={!!expanded.time}
-              onToggle={() => toggleField("time")}
-            >
-              <TimePickerField value={timeDraft} onChange={setTimeDraft} />
-              <EditorActions
-                onSave={handleSaveTime}
-                onCancel={() => closeField("time")}
-                saving={savingField === "time"}
-              />
-            </FieldRow>
-          )}
-
-          {showDateTimeRows && (
-            <FieldRow
-              icon="hourglass-outline"
-              label="Duration"
-              value={taskData.duration_minutes ? formatDuration(taskData.duration_minutes) : "Not set"}
-              expanded={!!expanded.duration}
-              onToggle={() => toggleField("duration")}
-            >
-              <DurationPicker value={durationDraft} onChange={setDurationDraft} />
-              <EditorActions
-                onSave={handleSaveDuration}
-                onCancel={() => closeField("duration")}
-                saving={savingField === "duration"}
-              />
-            </FieldRow>
-          )}
-
-          <FieldRow
-            icon="location-outline"
-            label="Location"
-            value={taskData.location_raw_text || "Not set"}
-            expanded={!!expanded.location}
-            onToggle={() => toggleField("location")}
-          >
-            <View style={styles.inlineEditorRow}>
+        <Text style={styles.sectionLabel}>Where</Text>
+        <View style={styles.card}>
+          <View style={[styles.locationRow, (taskData.resolved_address || taskData.leaving_by || taskData.leaving_by_error || (taskData.location_raw_text && taskData.datetime)) && styles.rowBorder]}>
+            <View style={styles.fieldIcon}>
+              <Ionicons name="location-outline" size={16} color={colors.textSecondary} />
+            </View>
+            <View style={styles.flex}>
               <TextInput
-                style={styles.inlineInput}
+                style={styles.locationInput}
                 value={locationDraft}
                 onChangeText={setLocationDraft}
-                placeholder="Where?"
+                onFocus={() => setFocusedField("location")}
+                onBlur={() => {
+                  setFocusedField(null);
+                  commitLocation();
+                }}
+                onSubmitEditing={() => Keyboard.dismiss()}
+                returnKeyType="done"
+                placeholder="Add a place"
                 placeholderTextColor={colors.textMuted}
-                autoFocus
+                accessibilityLabel="Location"
               />
-              <Pressable
-                onPress={handleSaveLocation}
-                disabled={savingField === "location"}
-                style={[styles.saveChip, savingField === "location" && styles.buttonDisabled]}
-              >
-                {savingField === "location" ? (
-                  <ActivityIndicator color={colors.onSurfaceInverse} size="small" />
-                ) : (
-                  <Text style={styles.saveChipText}>Save</Text>
-                )}
-              </Pressable>
-              <Pressable onPress={() => closeField("location")} disabled={savingField === "location"} hitSlop={8}>
-                <Text style={styles.cancelLink}>Cancel</Text>
-              </Pressable>
+              {taskData.resolved_address && taskData.resolved_address !== taskData.location_raw_text && (
+                <Text style={styles.resolvedAddress} numberOfLines={2}>
+                  {taskData.resolved_address}
+                </Text>
+              )}
             </View>
-            {locationDraft.trim().length > 0 && (
+            {taskData.location_raw_text && (
               <Pressable
-                onPress={() => openInMaps(locationDraft.trim())}
-                style={styles.openInMapsButton}
+                onPress={() => openInMaps(taskData.resolved_address ?? taskData.location_raw_text!)}
+                style={styles.mapsButton}
                 hitSlop={6}
+                accessibilityRole="button"
+                accessibilityLabel="Open in Maps"
               >
-                <Ionicons name="navigate-outline" size={14} color={colors.accent} />
-                <Text style={styles.openInMapsText}>Open in Maps</Text>
+                <Ionicons name="navigate-outline" size={15} color={colors.accent} />
+                <Text style={styles.mapsText}>Maps</Text>
               </Pressable>
             )}
-          </FieldRow>
+          </View>
 
           {/* Shows only when a "leaving by" reminder was never even attempted -
               typically because location access wasn't available at save time,
-              which fails silently there by design (see NewTaskScreen). Once
-              leaving_by, leaving_by_error, or resolved_address exist, one of
-              the two rows below takes over instead. */}
+              which fails silently there by design (see NewTaskScreen). */}
           {taskData.location_raw_text &&
             taskData.datetime &&
             !taskData.resolved_address &&
             !taskData.leaving_by &&
             !taskData.leaving_by_error && (
-              <View style={[styles.fieldRow, styles.fieldRowBorder]}>
-                <Pressable
-                  style={styles.fieldRowHeader}
-                  onPress={handleSetupDeparture}
-                  disabled={isSettingUpDeparture}
-                >
-                  <View style={styles.fieldIcon}>
-                    <Ionicons name="navigate-outline" size={16} color={colors.accent} />
-                  </View>
-                  <View style={styles.fieldRowText}>
-                    <Text style={styles.fieldRowLabel}>Leaving by</Text>
-                    <Text style={[styles.fieldRowValue, { color: colors.accent }]}>
-                      {isSettingUpDeparture ? "Setting up…" : "Tap to set up a reminder"}
-                    </Text>
-                  </View>
-                  {isSettingUpDeparture ? (
-                    <ActivityIndicator size="small" color={colors.accent} />
-                  ) : (
-                    <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
-                  )}
-                </Pressable>
-              </View>
+              <FieldRow
+                icon="navigate-outline"
+                iconColor={colors.accent}
+                label="Leaving by"
+                value={isSettingUpDeparture ? "Setting up…" : "Tap to set up a reminder"}
+                valueColor={colors.accent}
+                expanded={false}
+                onToggle={handleSetupDeparture}
+                readOnly={isSettingUpDeparture}
+                bordered={false}
+              />
             )}
-
-          {taskData.resolved_address && (
-            <FieldRow
-              icon="pin-outline"
-              label="Resolved to"
-              value={taskData.resolved_address}
-              valueLines={3}
-              expanded={false}
-              onToggle={() => {}}
-              readOnly
-            />
-          )}
 
           {(taskData.leaving_by || taskData.leaving_by_error) && (
             <FieldRow
@@ -963,114 +916,55 @@ function EditTaskScreenContent({ route, navigation }: Props) {
                   : formatTimeDisplay(taskData.leaving_by)
               }
               // The distance, starting point and directions go on their own
-              // lines under the time. Joined into one line they were cut off
-              // as soon as there was a long route.
+              // lines under the time, so a long route isn't cut off.
               details={taskData.leaving_by_error ? undefined : leavingByDetails(taskData)}
               valueLines={2}
               valueColor={taskData.leaving_by_error ? colors.warning : colors.accent}
               expanded={false}
-              // A failed calculation can be retried by tapping the row (same
-              // action as "Tap to set up a reminder"); a successful one is
-              // display-only, and so is the row while a retry is running.
+              // A failed calculation can be retried by tapping the row; a
+              // successful one is display-only, and so is the row mid-retry.
               onToggle={taskData.leaving_by_error ? handleSetupDeparture : () => {}}
               readOnly={!taskData.leaving_by_error || isSettingUpDeparture}
+              bordered={false}
             />
           )}
-
-          <FieldRow
-            icon="flag-outline"
-            label="Priority"
-            value={effectivePriority(taskData) ? capitalize(effectivePriority(taskData)!) : "None"}
-            expanded={!!expanded.priority}
-            onToggle={() => toggleField("priority")}
-          >
-            <SegmentedControl
-              options={[
-                // "None" is only meaningful for an event; for a task, no
-                // priority simply means low, so Low is the way to say it.
-                ...(taskData.type === "task" ? [] : [{ label: "None", value: NO_PRIORITY }]),
-                { label: "Low", value: "low" as Priority },
-                { label: "Normal", value: "normal" as Priority },
-                { label: "High", value: "high" as Priority },
-              ]}
-              value={priorityDraft}
-              onChange={setPriorityDraft}
-            />
-            <EditorActions
-              onSave={handleSavePriority}
-              onCancel={() => closeField("priority")}
-              saving={savingField === "priority"}
-            />
-          </FieldRow>
-
-          <FieldRow
-            icon="repeat-outline"
-            label="Recurrence"
-            value={taskData.recurring_frequency ? capitalize(taskData.recurring_frequency) : "None"}
-            expanded={!!expanded.recurrence}
-            onToggle={() => toggleField("recurrence")}
-            bordered={false}
-          >
-            <SegmentedControl
-              options={[
-                { label: "None", value: NO_RECURRENCE },
-                { label: "Daily", value: "daily" as RecurringFrequency },
-                { label: "Weekly", value: "weekly" as RecurringFrequency },
-                { label: "Monthly", value: "monthly" as RecurringFrequency },
-                { label: "Yearly", value: "yearly" as RecurringFrequency },
-              ]}
-              value={recurrenceFrequencyDraft}
-              onChange={setRecurrenceFrequencyDraft}
-            />
-            {recurrenceFrequencyDraft !== NO_RECURRENCE && (
-              <TextInput
-                style={[styles.inlineInput, styles.recurrenceDetailInput]}
-                value={recurrenceDetailDraft}
-                onChangeText={setRecurrenceDetailDraft}
-                placeholder="e.g. every other Tuesday"
-                placeholderTextColor={colors.textMuted}
-              />
-            )}
-            <EditorActions
-              onSave={handleSaveRecurrence}
-              onCancel={() => closeField("recurrence")}
-              saving={savingField === "recurrence"}
-            />
-          </FieldRow>
         </View>
+
+        <Text style={styles.sectionLabel}>Priority</Text>
+        <SegmentedControl
+          options={[
+            // "None" is only meaningful for an event; for a task, no priority
+            // simply means low, so Low is the way to say it.
+            ...(taskData.type === "task" ? [] : [{ label: "None", value: NO_PRIORITY }]),
+            { label: "Low", value: "low" as Priority },
+            { label: "Normal", value: "normal" as Priority },
+            { label: "High", value: "high" as Priority },
+          ]}
+          value={priorityValue}
+          onChange={choosePriority}
+        />
 
         <Text style={styles.sectionLabel}>Notes</Text>
-        <View style={styles.detailsCard}>
-          {expanded.notes ? (
-            <View style={styles.notesEditor}>
-              <TextInput
-                style={[styles.inlineInput, styles.notesInput]}
-                value={notesDraft}
-                onChangeText={setNotesDraft}
-                placeholder="Things to bring, a door code, anything to remember"
-                placeholderTextColor={colors.textMuted}
-                multiline
-                autoFocus
-                textAlignVertical="top"
-              />
-              <EditorActions
-                onSave={handleSaveNotes}
-                onCancel={() => closeField("notes")}
-                saving={savingField === "notes"}
-              />
-            </View>
-          ) : (
-            <Pressable onPress={() => toggleField("notes")} style={styles.notesBody}>
-              <Text style={taskData.notes ? styles.notesText : styles.notesPlaceholder}>
-                {taskData.notes || "Add notes - things to bring, a door code, anything"}
-              </Text>
-            </Pressable>
-          )}
-        </View>
+        <TextInput
+          style={styles.notesInput}
+          value={notesDraft}
+          onChangeText={setNotesDraft}
+          onFocus={() => setFocusedField("notes")}
+          onBlur={() => {
+            setFocusedField(null);
+            commitNotes();
+          }}
+          placeholder="Things to bring, a door code, anything to remember"
+          placeholderTextColor={colors.textMuted}
+          multiline
+          textAlignVertical="top"
+          accessibilityLabel="Notes"
+        />
 
         {error && <Text style={styles.error}>{error}</Text>}
 
         <Text style={styles.sectionLabel}>Ask AI</Text>
+        <Text style={styles.askHint}>Describe a change in your own words, like "move it to Friday at 3".</Text>
         {askMessages.map((message, index) => (
           <AskBubble key={index} role={message.role}>
             {message.content}
@@ -1105,6 +999,39 @@ function EditTaskScreenContent({ route, navigation }: Props) {
   );
 }
 
+// A detail edited by tapping a choice: icon and label on top (with an optional
+// plain-words summary), the choices below.
+function ChoiceRow({
+  icon,
+  label,
+  summary,
+  last = false,
+  children,
+}: {
+  icon: keyof typeof Ionicons.glyphMap;
+  label: string;
+  summary?: string;
+  last?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <View style={[styles.choiceRow, !last && styles.rowBorder]}>
+      <View style={styles.choiceHeader}>
+        <View style={styles.fieldIcon}>
+          <Ionicons name={icon} size={16} color={colors.textSecondary} />
+        </View>
+        <Text style={styles.choiceLabel}>{label}</Text>
+        {summary && (
+          <Text style={styles.choiceSummary} numberOfLines={1}>
+            {summary}
+          </Text>
+        )}
+      </View>
+      {children}
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -1114,24 +1041,47 @@ const styles = StyleSheet.create({
     padding: 16,
     paddingBottom: 24,
   },
+  flex: {
+    flex: 1,
+  },
+  headerActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 14,
+  },
+  saveStatus: {
+    fontSize: 13,
+    color: colors.textSecondary,
+  },
+  titleInput: {
+    fontSize: 24,
+    fontWeight: "700",
+    color: colors.textPrimary,
+    paddingVertical: 4,
+    paddingHorizontal: 0,
+  },
+  typeRow: {
+    marginTop: 10,
+  },
   sectionLabel: {
     fontSize: 12,
     fontWeight: "700",
     color: colors.textSecondary,
     textTransform: "uppercase",
     letterSpacing: 0.5,
-    marginTop: 20,
+    marginTop: 24,
     marginBottom: 8,
   },
-  taskTitle: {
-    fontSize: 24,
-    fontWeight: "700",
-    color: colors.textPrimary,
-  },
-  detailsCard: {
-    backgroundColor: colors.surfaceAlt,
+  card: {
+    backgroundColor: colors.surface,
     borderRadius: 14,
+    borderWidth: 1,
+    borderColor: colors.border,
     overflow: "hidden",
+  },
+  rowBorder: {
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
   },
   fieldRow: {
     paddingHorizontal: 12,
@@ -1176,108 +1126,120 @@ const styles = StyleSheet.create({
   fieldEditor: {
     paddingBottom: 14,
   },
-  inlineEditorRow: {
+  editorFooter: {
+    flexDirection: "row",
+    alignItems: "flex-end",
+    justifyContent: "space-between",
+  },
+  removeLink: {
+    color: colors.danger,
+    fontSize: 14,
+  },
+  subEditor: {
+    marginTop: 12,
+  },
+  choiceRow: {
+    paddingHorizontal: 12,
+    paddingTop: 12,
+    paddingBottom: 14,
+  },
+  choiceHeader: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 10,
-    marginTop: 8,
+    gap: 12,
+    marginBottom: 10,
   },
-  inlineInput: {
+  choiceLabel: {
+    fontSize: 12,
+    color: colors.textSecondary,
+  },
+  choiceSummary: {
     flex: 1,
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.accent,
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    fontSize: 15,
+    textAlign: "right",
+    fontSize: 13,
+    fontWeight: "600",
     color: colors.textPrimary,
   },
-  recurrenceDetailInput: {
-    marginTop: 10,
+  weekdays: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginTop: 12,
   },
-  notesEditor: {
-    padding: 12,
+  weekday: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  weekdaySelected: {
+    backgroundColor: colors.accent,
+    borderColor: colors.accent,
+  },
+  weekdayText: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: colors.textPrimary,
+  },
+  weekdayTextSelected: {
+    color: colors.onSurfaceInverse,
+  },
+  locationRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  locationInput: {
+    fontSize: 16,
+    fontWeight: "500",
+    color: colors.textPrimary,
+    paddingVertical: 6,
+  },
+  resolvedAddress: {
+    fontSize: 13,
+    color: colors.textSecondary,
+    marginBottom: 4,
+  },
+  mapsButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: colors.accentSoft,
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  mapsText: {
+    color: colors.accent,
+    fontSize: 13,
+    fontWeight: "600",
   },
   notesInput: {
-    flex: 0,
-    minHeight: 110,
-  },
-  notesBody: {
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 14,
     paddingHorizontal: 14,
-    paddingVertical: 14,
-  },
-  notesText: {
+    paddingTop: 12,
+    paddingBottom: 12,
+    minHeight: 96,
     fontSize: 15,
     lineHeight: 21,
     color: colors.textPrimary,
   },
-  notesPlaceholder: {
-    fontSize: 15,
-    color: colors.accent,
-  },
-  segmentedControl: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 8,
-  },
-  segment: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 999,
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  segmentSelected: {
-    backgroundColor: colors.accent,
-    borderColor: colors.accent,
-  },
-  segmentText: {
-    fontSize: 14,
-    color: colors.textPrimary,
-    fontWeight: "500",
-  },
-  segmentTextSelected: {
-    color: colors.onSurfaceInverse,
-  },
-  editorActionsRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 16,
-    marginTop: 10,
-  },
-  saveChip: {
-    backgroundColor: colors.accent,
-    borderRadius: 8,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  saveChipText: {
-    color: colors.onSurfaceInverse,
-    fontSize: 14,
-    fontWeight: "600",
-  },
-  cancelLink: {
-    color: colors.textSecondary,
-    fontSize: 14,
-  },
-  openInMapsButton: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 4,
-    marginTop: 10,
-  },
-  openInMapsText: {
-    color: colors.accent,
-    fontSize: 13,
-    fontWeight: "500",
-  },
   error: {
     color: colors.danger,
     marginTop: 12,
+  },
+  askHint: {
+    fontSize: 13,
+    color: colors.textSecondary,
+    marginBottom: 8,
   },
   askBubble: {
     borderRadius: 16,

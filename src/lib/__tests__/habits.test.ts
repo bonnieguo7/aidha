@@ -2,6 +2,7 @@ import {
   cadenceLabel,
   finalizeHabit,
   habitProgress,
+  latestCheckinThisPeriod,
   nextPeriodStart,
   periodStart,
   planHabitReminders,
@@ -145,5 +146,19 @@ describe("finalizeHabit", () => {
     expect(
       finalizeHabit({ title: "  Gym ", cadence: "weekly", target_count: 9, reminder_time: "nope", notes: "  " })
     ).toEqual({ title: "Gym", cadence: "weekly", target_count: 7, reminder_time: null, notes: null });
+  });
+});
+
+describe("latestCheckinThisPeriod", () => {
+  const c = (id: string, when: string) => ({ id, habit_id: "h1", completed_at: iso(when) });
+
+  it("picks the newest check-in in the current period, whatever the order", () => {
+    const checkins = [c("mon", "2026-11-23T09:00:00"), c("thu", "2026-11-26T08:00:00"), c("tue", "2026-11-24T09:00:00")];
+    expect(latestCheckinThisPeriod("weekly", checkins, NOW)?.id).toBe("thu");
+  });
+
+  it("never reaches back into an earlier period", () => {
+    expect(latestCheckinThisPeriod("daily", [c("yesterday", "2026-11-25T21:00:00")], NOW)).toBeNull();
+    expect(latestCheckinThisPeriod("weekly", [c("last week", "2026-11-22T21:00:00")], NOW)).toBeNull();
   });
 });

@@ -5,19 +5,25 @@ import { colors } from "../lib/theme";
 import type { HabitStatus } from "../lib/useHabits";
 
 // One habit: a check-in button, its name, this period's progress and its
-// streak. Tapping the row (not the button) opens the habit.
+// streak. The button works like a checkbox: tapping a done habit unchecks it
+// (takes back this period's latest check-in), and on a habit that's partway
+// there ("1 of 3") a long press takes one back. Tapping the row (not the
+// button) opens the habit.
 export default function HabitRowItem({
   status,
   busy,
   onCheckIn,
+  onUncheck,
   onPress,
 }: {
   status: HabitStatus;
   busy: boolean;
   onCheckIn: () => void;
+  onUncheck: () => void;
   onPress: () => void;
 }) {
   const { habit, progress } = status;
+  const canUndo = progress.done > 0;
   const details = [
     progress.target > 1 || progress.met ? progressLabel(habit.cadence, progress) : cadenceLabel(habit.cadence, 1),
     progress.streak > 0 ? `🔥 ${streakLabel(habit.cadence, progress.streak)}` : null,
@@ -26,13 +32,19 @@ export default function HabitRowItem({
   return (
     <View style={styles.row}>
       <Pressable
-        onPress={onCheckIn}
-        disabled={progress.met || busy}
+        onPress={progress.met ? onUncheck : onCheckIn}
+        onLongPress={canUndo && !progress.met ? onUncheck : undefined}
+        disabled={busy}
         hitSlop={8}
         style={[styles.check, progress.met && styles.checkDone]}
-        accessibilityRole="button"
-        accessibilityLabel={progress.met ? `${habit.title}: ${progressLabel(habit.cadence, progress)}` : `Check in: ${habit.title}`}
-        accessibilityState={{ disabled: progress.met || busy, checked: progress.met }}
+        accessibilityRole="checkbox"
+        accessibilityLabel={habit.title}
+        accessibilityHint={progress.met ? "Unchecks it" : "Checks in"}
+        accessibilityState={{ disabled: busy, checked: progress.met ? true : canUndo ? "mixed" : false }}
+        accessibilityActions={canUndo && !progress.met ? [{ name: "undo", label: "Undo last check-in" }] : undefined}
+        onAccessibilityAction={(event) => {
+          if (event.nativeEvent.actionName === "undo") onUncheck();
+        }}
       >
         {busy ? (
           <ActivityIndicator size="small" color={colors.success} />

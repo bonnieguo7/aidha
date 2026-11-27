@@ -13,6 +13,7 @@ import {
   View,
 } from "react-native";
 import CalendarMonthView, { dateKey } from "./CalendarMonthView";
+import DayView from "./DayView";
 import { archivePastEvents } from "../lib/autoArchivePastEvents";
 import { useAccomplishments } from "../lib/AccomplishmentsContext";
 import { completeTask } from "../lib/completeTask";
@@ -31,7 +32,8 @@ interface Section {
   data: TaskRow[];
 }
 
-type EventView = "list" | "calendar";
+// "day" is the 24-hour timeline for one day (the same view as Today's "Day").
+type EventView = "list" | "calendar" | "day";
 
 interface Props {
   completed: boolean;
@@ -126,6 +128,11 @@ export default function TaskSectionList({
     if (initialViewMode) setViewMode(initialViewMode);
     if (initialEventView) setEventView(initialEventView);
   }, [initialViewMode, initialEventView]);
+
+  // The Archive has no day view; switching to it from there shows its calendar.
+  useEffect(() => {
+    if (completed) setEventView((view) => (view === "day" ? "calendar" : view));
+  }, [completed]);
   const [selectedDate, setSelectedDate] = useState(() => new Date());
   const [allTasks, setAllTasks] = useState<TaskRow[]>([]);
   // Calendar-only: every event regardless of is_completed, so the Tasks tab's
@@ -299,6 +306,8 @@ export default function TaskSectionList({
   }
 
   const showCalendar = viewMode === "event" && eventView === "calendar";
+  // The day timeline isn't an archive view - it shows everything on that day.
+  const showDay = viewMode === "event" && eventView === "day" && !completed;
 
   return (
     <View style={styles.container}>
@@ -334,10 +343,26 @@ export default function TaskSectionList({
               Calendar
             </Text>
           </Pressable>
+          {!completed && (
+            <Pressable
+              onPress={() => setEventView("day")}
+              style={[styles.subTab, eventView === "day" && styles.subTabActive]}
+            >
+              <Text style={[styles.subTabText, eventView === "day" && styles.subTabTextActive]}>Day</Text>
+            </Pressable>
+          )}
         </View>
       )}
 
-      {isLoading ? (
+      {showDay ? (
+        // Mounted fresh each time this view opens, so it starts on the day
+        // picked in the calendar; stepping days moves the calendar along too.
+        <DayView
+          initialDate={selectedDate}
+          onDateChange={setSelectedDate}
+          onOpenTask={onSelectTask}
+        />
+      ) : isLoading ? (
         <View style={styles.centered}>
           <ActivityIndicator color={colors.accent} />
         </View>
@@ -366,9 +391,24 @@ export default function TaskSectionList({
               <RefreshControl refreshing={isRefreshing} onRefresh={handleRefresh} tintColor={colors.accent} />
             }
           >
-            <Text style={styles.agendaLabel}>
-              {selectedDate.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}
-            </Text>
+            <View style={styles.agendaHeader}>
+              <Text style={styles.agendaLabel}>
+                {selectedDate.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}
+              </Text>
+              {!completed && (
+                <Pressable
+                  onPress={() => setEventView("day")}
+                  style={styles.dayViewButton}
+                  hitSlop={8}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Open the day view for ${selectedDate.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}`}
+                >
+                  <Ionicons name="time-outline" size={14} color={colors.accent} />
+                  <Text style={styles.dayViewText}>Day view</Text>
+                  <Ionicons name="chevron-forward" size={14} color={colors.accent} />
+                </Pressable>
+              )}
+            </View>
             {selectedDateEvents.length === 0 ? (
               <Text style={styles.agendaEmptyText}>No events this day.</Text>
             ) : (
@@ -548,14 +588,34 @@ const styles = StyleSheet.create({
     color: colors.onSurfaceInverse,
     fontWeight: "600",
   },
+  agendaHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginTop: 18,
+    marginBottom: 8,
+  },
   agendaLabel: {
+    flexShrink: 1,
     fontSize: 11,
     fontWeight: "700",
     color: colors.textSecondary,
     textTransform: "uppercase",
     letterSpacing: 0.5,
-    marginTop: 18,
-    marginBottom: 8,
+  },
+  dayViewButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: colors.accentSoft,
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+  },
+  dayViewText: {
+    color: colors.accent,
+    fontSize: 13,
+    fontWeight: "600",
   },
   agendaEmptyText: {
     fontSize: 14,

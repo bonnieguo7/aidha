@@ -305,6 +305,11 @@ export default function TodayScreen({ navigation }: Props) {
     if (checkInError) Alert.alert("Couldn't check in", checkInError);
   }
 
+  async function handleHabitUncheck(habit: HabitRow) {
+    const uncheckError = await habits.uncheck(habit);
+    if (uncheckError) Alert.alert("Couldn't uncheck it", uncheckError);
+  }
+
   function openHabit(habit: HabitRow) {
     navigation.navigate("HabitDetail", { habit });
   }
@@ -337,6 +342,7 @@ export default function TodayScreen({ navigation }: Props) {
       statuses={habits.statuses}
       busyIds={habits.busyIds}
       onCheckIn={handleHabitCheckIn}
+      onUncheck={handleHabitUncheck}
       onOpen={openHabit}
     />
   );

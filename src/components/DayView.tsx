@@ -34,8 +34,19 @@ function summarize(tasks: TaskRow[]): string {
   return parts.length > 0 ? parts.join(" · ") : "Nothing scheduled";
 }
 
-export default function DayView({ onOpenTask }: { onOpenTask: (task: TaskRow) => void }) {
-  const [date, setDate] = useState(startOfToday);
+// A 24-hour grid of one day's timed tasks and events, with arrows to step
+// between days. Starts on `initialDate` (today by default) and reports each day
+// it moves to through onDateChange, so a calendar beside it can follow along.
+export default function DayView({
+  onOpenTask,
+  initialDate,
+  onDateChange,
+}: {
+  onOpenTask: (task: TaskRow) => void;
+  initialDate?: Date;
+  onDateChange?: (date: Date) => void;
+}) {
+  const [date, setDate] = useState(() => (initialDate ? getDayBounds(initialDate).start : startOfToday()));
   const [tasks, setTasks] = useState<TaskRow[]>([]);
   const [isLoaded, setIsLoaded] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -89,6 +100,7 @@ export default function DayView({ onOpenTask }: { onOpenTask: (task: TaskRow) =>
   function goToDay(next: Date) {
     setIsLoaded(false);
     setDate(next);
+    onDateChange?.(next);
   }
 
   function shiftDay(delta: number) {

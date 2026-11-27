@@ -1,4 +1,4 @@
-import type { HabitCadence, HabitDraft } from "../types/habit";
+import type { HabitCadence, HabitCheckin, HabitDraft } from "../types/habit";
 import { startOfMonth, startOfWeek } from "./accomplishments";
 
 // Pure habit logic: periods, progress, streaks and when to send reminders. All
@@ -70,6 +70,25 @@ export function habitProgress(
     start = previousPeriodStart(habit.cadence, start);
   }
   return { done: Math.min(done, target), target, met, streak };
+}
+
+// The most recent check-in in the current period - what unchecking a habit
+// removes. Null if there's none this period (an older one is left alone: undoing
+// last week's check-in from today's list would be surprising).
+export function latestCheckinThisPeriod(
+  cadence: HabitCadence,
+  checkins: HabitCheckin[],
+  now: Date
+): HabitCheckin | null {
+  const start = periodStart(cadence, now).getTime();
+  const end = nextPeriodStart(cadence, periodStart(cadence, now)).getTime();
+  let latest: HabitCheckin | null = null;
+  for (const c of checkins) {
+    const t = new Date(c.completed_at).getTime();
+    if (t < start || t >= end) continue;
+    if (!latest || t > new Date(latest.completed_at).getTime()) latest = c;
+  }
+  return latest;
 }
 
 const UNIT: Record<HabitCadence, [string, string]> = {

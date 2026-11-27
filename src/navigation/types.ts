@@ -8,7 +8,7 @@ export type TasksStackParamList = {
   TodayList: undefined;
   // Optional: set by the Today screen's calendar shortcut so "Tasks" opens
   // straight into Events > Calendar instead of its default Tasks > List view.
-  TaskList: { initialViewMode?: TaskType; initialEventView?: "list" | "calendar" } | undefined;
+  TaskList: { initialViewMode?: TaskType; initialEventView?: "list" | "calendar" | "day" } | undefined;
   EditTask: { task: TaskRow };
   HabitDetail: { habit: HabitRow };
   // The Habits tab: the list of habits, and the page for starting a new one.

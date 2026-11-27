@@ -4,23 +4,26 @@ import { colors } from "../lib/theme";
 import type { HabitStatus } from "../lib/useHabits";
 import type { HabitRow } from "../types/habit";
 
-// Today's "Habits" section: the habits still to do this period, checkable in
-// place. Ones already met for the period drop out; when they all have, a single
-// line says so. Renders nothing if the user has no habits.
+// Today's "Habits" section: every habit, checkable in place - the ones still to
+// do this period first, then the ones already done (still shown, so a mis-tap
+// can be unchecked right there). Renders nothing if the user has no habits.
 export default function TodayHabitsSection({
   statuses,
   busyIds,
   onCheckIn,
+  onUncheck,
   onOpen,
 }: {
   statuses: HabitStatus[];
   busyIds: Set<string>;
   onCheckIn: (habit: HabitRow) => void;
+  onUncheck: (habit: HabitRow) => void;
   onOpen: (habit: HabitRow) => void;
 }) {
   if (statuses.length === 0) return null;
   const pending = statuses.filter((s) => !s.progress.met);
-  const doneCount = statuses.length - pending.length;
+  const done = statuses.filter((s) => s.progress.met);
+  const doneCount = done.length;
 
   return (
     <View style={styles.section}>
@@ -33,19 +36,16 @@ export default function TodayHabitsSection({
           </Text>
         )}
       </View>
-      {pending.length === 0 ? (
-        <Text style={styles.allDone}>All habits done for now ✓</Text>
-      ) : (
-        pending.map((status) => (
-          <HabitRowItem
-            key={status.habit.id}
-            status={status}
-            busy={busyIds.has(status.habit.id)}
-            onCheckIn={() => onCheckIn(status.habit)}
-            onPress={() => onOpen(status.habit)}
-          />
-        ))
-      )}
+      {[...pending, ...done].map((status) => (
+        <HabitRowItem
+          key={status.habit.id}
+          status={status}
+          busy={busyIds.has(status.habit.id)}
+          onCheckIn={() => onCheckIn(status.habit)}
+          onUncheck={() => onUncheck(status.habit)}
+          onPress={() => onOpen(status.habit)}
+        />
+      ))}
     </View>
   );
 }
@@ -77,10 +77,5 @@ const styles = StyleSheet.create({
     marginLeft: "auto",
     fontSize: 12,
     color: colors.textSecondary,
-  },
-  allDone: {
-    fontSize: 14,
-    color: colors.textSecondary,
-    paddingVertical: 4,
   },
 });

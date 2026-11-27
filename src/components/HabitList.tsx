@@ -15,7 +15,7 @@ export default function HabitList({
   onSelectHabit: (habit: HabitRow) => void;
   onNewHabit: () => void;
 }) {
-  const { statuses, isLoading, error, reload, checkIn, busyIds } = useHabits();
+  const { statuses, isLoading, error, reload, checkIn, uncheck, busyIds } = useHabits();
   const [isRefreshing, setIsRefreshing] = useState(false);
 
   async function handleRefresh() {
@@ -27,6 +27,11 @@ export default function HabitList({
   async function handleCheckIn(habit: HabitRow) {
     const checkInError = await checkIn(habit);
     if (checkInError) Alert.alert("Couldn't check in", checkInError);
+  }
+
+  async function handleUncheck(habit: HabitRow) {
+    const uncheckError = await uncheck(habit);
+    if (uncheckError) Alert.alert("Couldn't uncheck it", uncheckError);
   }
 
   const doneCount = statuses.filter((s) => s.progress.met).length;
@@ -82,6 +87,7 @@ export default function HabitList({
           status={item}
           busy={busyIds.has(item.habit.id)}
           onCheckIn={() => handleCheckIn(item.habit)}
+          onUncheck={() => handleUncheck(item.habit)}
           onPress={() => onSelectHabit(item.habit)}
         />
       )}

@@ -12,22 +12,37 @@ export function SegmentedControl<T extends string>({
   options,
   value,
   onChange,
+  compact = false,
 }: {
   options: { label: string; value: T }[];
   value: T;
   onChange: (value: T) => void;
+  // Smaller chips, for a row of choices inside a card.
+  compact?: boolean;
 }) {
   return (
-    <View style={fieldEditorStyles.segmentedControl}>
+    <View style={[fieldEditorStyles.segmentedControl, compact && fieldEditorStyles.segmentedControlCompact]}>
       {options.map((option) => {
         const selected = option.value === value;
         return (
           <Pressable
             key={option.value}
             onPress={() => onChange(option.value)}
-            style={[fieldEditorStyles.segment, selected && fieldEditorStyles.segmentSelected]}
+            style={[
+              fieldEditorStyles.segment,
+              compact && fieldEditorStyles.segmentCompact,
+              selected && fieldEditorStyles.segmentSelected,
+            ]}
+            accessibilityRole="radio"
+            accessibilityState={{ selected }}
           >
-            <Text style={[fieldEditorStyles.segmentText, selected && fieldEditorStyles.segmentTextSelected]}>
+            <Text
+              style={[
+                fieldEditorStyles.segmentText,
+                compact && fieldEditorStyles.segmentTextCompact,
+                selected && fieldEditorStyles.segmentTextSelected,
+              ]}
+            >
               {option.label}
             </Text>
           </Pressable>
@@ -245,6 +260,16 @@ export const fieldEditorStyles = StyleSheet.create({
     backgroundColor: colors.surface,
     borderWidth: 1,
     borderColor: colors.border,
+  },
+  segmentedControlCompact: {
+    gap: 6,
+  },
+  segmentCompact: {
+    paddingHorizontal: 11,
+    paddingVertical: 6,
+  },
+  segmentTextCompact: {
+    fontSize: 13,
   },
   segmentSelected: {
     backgroundColor: colors.accent,

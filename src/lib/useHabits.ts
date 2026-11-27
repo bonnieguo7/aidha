@@ -2,8 +2,8 @@ import { useFocusEffect } from "@react-navigation/native";
 import { useCallback, useMemo, useRef, useState } from "react";
 import { useAccomplishments } from "./AccomplishmentsContext";
 import { syncHabitReminders } from "./habitReminders";
-import { habitProgress, type HabitProgress } from "./habits";
-import { addCheckin, fetchHabitCheckins, fetchHabits } from "./habitsApi";
+import { habitProgress, latestCheckinThisPeriod, type HabitProgress } from "./habits";
+import { addCheckin, fetchHabitCheckins, fetchHabits, removeCheckin } from "./habitsApi";
 import type { HabitCheckin, HabitRow } from "../types/habit";
 
 export interface HabitStatus {
@@ -34,7 +34,7 @@ export function statusesFor(habits: HabitRow[], checkins: HabitCheckin[], now: D
 // the screen using it comes into focus, and re-plans habit reminders after each
 // load and check-in so they match what's left to do.
 export function useHabits() {
-  const { recordCheckin } = useAccomplishments();
+  const { recordCheckin, recordCheckinRemoved } = useAccomplishments();
   const [habits, setHabits] = useState<HabitRow[]>([]);
   const [checkins, setCheckins] = useState<HabitCheckin[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -66,16 +66,21 @@ export function useHabits() {
 
   const statuses = useMemo(() => statusesFor(habits, checkins, new Date()), [habits, checkins]);
 
+  const setBusy = useCallback((id: string, busy: boolean) => {
+    setBusyIds((prev) => {
+      const next = new Set(prev);
+      if (busy) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }, []);
+
   const checkIn = useCallback(
     async (habit: HabitRow): Promise<string | null> => {
       if (busyIds.has(habit.id)) return null;
-      setBusyIds((prev) => new Set(prev).add(habit.id));
+      setBusy(habit.id, true);
       const { data, error: insertError } = await addCheckin(habit.id);
-      setBusyIds((prev) => {
-        const next = new Set(prev);
-        next.delete(habit.id);
-        return next;
-      });
+      setBusy(habit.id, false);
       if (insertError || !data) return insertError ?? "Couldn't save the check-in.";
 
       // A reload started before this check-in would come back without it.
@@ -87,8 +92,34 @@ export function useHabits() {
       syncHabitReminders(habits, nextCheckins);
       return null;
     },
-    [busyIds, checkins, habits, recordCheckin]
+    [busyIds, checkins, habits, recordCheckin, setBusy]
   );
 
-  return { statuses, isLoading, error, reload, checkIn, busyIds };
+  // Takes back the most recent check-in of the current period - for a
+  // mis-tap. Does nothing if there's none this period.
+  const uncheck = useCallback(
+    async (habit: HabitRow): Promise<string | null> => {
+      if (busyIds.has(habit.id)) return null;
+      const latest = latestCheckinThisPeriod(
+        habit.cadence,
+        checkins.filter((c) => c.habit_id === habit.id),
+        new Date()
+      );
+      if (!latest) return null;
+      setBusy(habit.id, true);
+      const removeError = await removeCheckin(latest.id);
+      setBusy(habit.id, false);
+      if (removeError) return removeError;
+
+      loadId.current += 1;
+      const nextCheckins = checkins.filter((c) => c.id !== latest.id);
+      setCheckins(nextCheckins);
+      recordCheckinRemoved();
+      syncHabitReminders(habits, nextCheckins);
+      return null;
+    },
+    [busyIds, checkins, habits, recordCheckinRemoved, setBusy]
+  );
+
+  return { statuses, isLoading, error, reload, checkIn, uncheck, busyIds };
 }
