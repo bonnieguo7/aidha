@@ -32,7 +32,7 @@ export async function hasNotificationPermission(): Promise<boolean> {
   return status === "granted";
 }
 
-async function ensureNotificationPermission(): Promise<boolean> {
+export async function ensureNotificationPermission(): Promise<boolean> {
   const { status: existingStatus } = await Notifications.getPermissionsAsync();
   if (existingStatus === "granted") return true;
 

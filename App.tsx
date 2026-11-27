@@ -6,11 +6,17 @@ import * as Notifications from "expo-notifications";
 import { StatusBar } from "expo-status-bar";
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
+import { AccomplishmentsProvider } from "./src/lib/AccomplishmentsContext";
 import { AuthProvider, useAuth } from "./src/lib/AuthContext";
 import { colors } from "./src/lib/theme";
 import AuthScreen from "./src/screens/AuthScreen";
+import CompletedTasksScreen from "./src/screens/CompletedTasksScreen";
 import EditTaskScreen from "./src/screens/EditTaskScreen";
+import HabitDetailScreen from "./src/screens/HabitDetailScreen";
+import HabitsScreen from "./src/screens/HabitsScreen";
+import NewHabitScreen from "./src/screens/NewHabitScreen";
 import NewTaskScreen from "./src/screens/NewTaskScreen";
+import ProfileScreen from "./src/screens/ProfileScreen";
 import TaskListScreen from "./src/screens/TaskListScreen";
 import TodayScreen from "./src/screens/TodayScreen";
 import type { TasksStackParamList } from "./src/navigation/types";
@@ -32,6 +38,7 @@ Notifications.setNotificationHandler({
 const TAB_ICONS: Record<string, keyof typeof Ionicons.glyphMap> = {
   Today: "home-outline",
   Tasks: "list-outline",
+  Habits: "flame-outline",
 };
 
 const screenOptions = {
@@ -74,10 +81,17 @@ const TaskListStack = createNativeStackNavigator<TasksStackParamList>();
 function TodayStackNavigator() {
   return (
     <TodayStack.Navigator screenOptions={screenOptions}>
-      {/* TodayScreen renders its own header (avatar, name, settings gear), so the
+      {/* TodayScreen renders its own header (avatar, name, calendar and profile buttons), so the
           native stack header is turned off just for this one screen. */}
       <TodayStack.Screen name="TodayList" component={TodayScreen} options={{ headerShown: false }} />
       <TodayStack.Screen name="EditTask" component={EditTaskScreen} />
+      <TodayStack.Screen name="HabitDetail" component={HabitDetailScreen} />
+      <TodayStack.Screen name="Profile" component={ProfileScreen} options={{ title: "Profile" }} />
+      <TodayStack.Screen
+        name="CompletedTasks"
+        component={CompletedTasksScreen}
+        options={({ route }) => ({ title: route.params.title })}
+      />
     </TodayStack.Navigator>
   );
 }
@@ -91,6 +105,18 @@ function TaskListStackNavigator() {
       <TaskListStack.Screen name="TaskList" component={TaskListScreen} options={{ title: "Tasks" }} />
       <TaskListStack.Screen name="EditTask" component={EditTaskScreen} />
     </TaskListStack.Navigator>
+  );
+}
+
+const HabitsStack = createNativeStackNavigator<TasksStackParamList>();
+
+function HabitsStackNavigator() {
+  return (
+    <HabitsStack.Navigator screenOptions={screenOptions}>
+      <HabitsStack.Screen name="HabitsHome" component={HabitsScreen} options={{ title: "Habits" }} />
+      <HabitsStack.Screen name="NewHabit" component={NewHabitScreen} options={{ title: "New habit" }} />
+      <HabitsStack.Screen name="HabitDetail" component={HabitDetailScreen} />
+    </HabitsStack.Navigator>
   );
 }
 
@@ -119,13 +145,16 @@ function AppNavigator() {
   }
 
   return (
+    <AccomplishmentsProvider>
     <NavigationContainer>
       <Tab.Navigator initialRouteName="Today" screenOptions={tabScreenOptions}>
         <Tab.Screen name="Today" component={TodayStackNavigator} options={{ headerShown: false }} />
         <Tab.Screen name="New Task" component={NewTaskScreen} options={{ tabBarButton: NewTaskTabButton }} />
         <Tab.Screen name="Tasks" component={TaskListStackNavigator} options={{ headerShown: false }} />
+        <Tab.Screen name="Habits" component={HabitsStackNavigator} options={{ headerShown: false }} />
       </Tab.Navigator>
     </NavigationContainer>
+    </AccomplishmentsProvider>
   );
 }
 

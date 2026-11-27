@@ -298,10 +298,23 @@ export default function NewTaskScreen() {
         </AssistantBubble>
 
         {messages.length === 0 && !result && !isSending && (
-          <Pressable onPress={() => setIsManual(true)} style={styles.manualEntry} hitSlop={8}>
-            <Ionicons name="create-outline" size={16} color={colors.accent} />
-            <Text style={styles.manualEntryText}>Or fill in the details yourself</Text>
-          </Pressable>
+          <>
+            <Pressable onPress={() => setIsManual(true)} style={styles.manualEntry} hitSlop={8}>
+              <Ionicons name="create-outline" size={16} color={colors.accent} />
+              <Text style={styles.manualEntryText}>Or fill in the details yourself</Text>
+            </Pressable>
+            {/* Habits have their own tab, so the chat stays about tasks and events. */}
+            <Pressable
+              onPress={() => navigation.navigate("Habits", { screen: "NewHabit", initial: false })}
+              style={styles.habitHint}
+              hitSlop={8}
+            >
+              <Ionicons name="flame-outline" size={16} color={colors.textSecondary} />
+              <Text style={styles.habitHintText}>
+                Building a habit? <Text style={styles.habitHintLink}>Start one in Habits</Text>
+              </Text>
+            </Pressable>
+          </>
         )}
 
         {messages.map((message, index) =>
@@ -558,6 +571,22 @@ const styles = StyleSheet.create({
     gap: 6,
     paddingVertical: 6,
     marginBottom: 10,
+  },
+  habitHint: {
+    flexDirection: "row",
+    alignItems: "center",
+    alignSelf: "flex-start",
+    gap: 6,
+    paddingVertical: 6,
+    marginBottom: 10,
+  },
+  habitHintText: {
+    color: colors.textSecondary,
+    fontSize: 14,
+  },
+  habitHintLink: {
+    color: colors.accent,
+    fontWeight: "600",
   },
   manualEntryText: {
     color: colors.accent,

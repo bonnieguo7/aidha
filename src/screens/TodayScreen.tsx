@@ -14,9 +14,11 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useAuth } from "../lib/AuthContext";
 import DayView from "../components/DayView";
+import TodayHabitsSection from "../components/TodayHabitsSection";
+import { useAccomplishments } from "../lib/AccomplishmentsContext";
 import { archivePastEvents } from "../lib/autoArchivePastEvents";
+import { useHabits } from "../lib/useHabits";
 import { getCurrentUserLocation } from "../lib/locationPermission";
 import { completeTask } from "../lib/completeTask";
 import { ensureRecurringReminders } from "../lib/ensureRecurringReminders";
@@ -30,6 +32,7 @@ import { supabase } from "../lib/supabase";
 import { configureRemovalAnimation, useCompleteAnimation } from "../lib/useCompleteAnimation";
 import { colors } from "../lib/theme";
 import type { TasksStackParamList } from "../navigation/types";
+import type { HabitRow } from "../types/habit";
 import type { Priority, TaskRow } from "../types/task";
 
 type Props = NativeStackScreenProps<TasksStackParamList, "TodayList">;
@@ -195,7 +198,8 @@ function rowPillText(kind: SectionKind, task: TaskRow): string | null {
 }
 
 export default function TodayScreen({ navigation }: Props) {
-  const { signOut } = useAuth();
+  const { recordCompletion, refresh: refreshAccomplishments } = useAccomplishments();
+  const habits = useHabits();
   const [allTasks, setAllTasks] = useState<TaskRow[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -231,6 +235,7 @@ export default function TodayScreen({ navigation }: Props) {
     useCallback(() => {
       setIsLoading(true);
       loadTasks().finally(() => setIsLoading(false));
+      refreshAccomplishments();
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [])
   );
@@ -255,6 +260,7 @@ export default function TodayScreen({ navigation }: Props) {
 
   async function handleRefresh() {
     setIsRefreshing(true);
+    habits.reload();
     const rows = await loadTasks();
     await refreshHeroDeparture(rows);
     setIsRefreshing(false);
@@ -262,13 +268,14 @@ export default function TodayScreen({ navigation }: Props) {
 
   async function handleComplete(item: TaskRow) {
     setBusyId(item.id);
-    const { next, error: completeError } = await completeTask(item);
+    const { next, error: completeError, completed } = await completeTask(item);
     setBusyId(null);
 
     if (completeError) {
       setError(completeError);
       return;
     }
+    if (completed) recordCompletion(item);
     configureRemovalAnimation();
     setAllTasks((prev) => [...prev.filter((t) => t.id !== item.id), ...(next ? [next] : [])]);
   }
@@ -289,11 +296,17 @@ export default function TodayScreen({ navigation }: Props) {
     ]);
   }
 
-  function handleSettingsPress() {
-    Alert.alert("Sign out", "Sign out of Aidha?", [
-      { text: "Cancel", style: "cancel" },
-      { text: "Sign out", style: "destructive", onPress: () => signOut() },
-    ]);
+  function openProfile() {
+    navigation.navigate("Profile");
+  }
+
+  async function handleHabitCheckIn(habit: HabitRow) {
+    const checkInError = await habits.checkIn(habit);
+    if (checkInError) Alert.alert("Couldn't check in", checkInError);
+  }
+
+  function openHabit(habit: HabitRow) {
+    navigation.navigate("HabitDetail", { habit });
   }
 
   function openTask(item: TaskRow) {
@@ -319,22 +332,37 @@ export default function TodayScreen({ navigation }: Props) {
     groups.noDateHighPriorityList.length > 0 ||
     groups.flexibleList.length > 0;
 
+  const habitsSection = (
+    <TodayHabitsSection
+      statuses={habits.statuses}
+      busyIds={habits.busyIds}
+      onCheckIn={handleHabitCheckIn}
+      onOpen={openHabit}
+    />
+  );
+
   return (
     <SafeAreaView style={styles.container} edges={["top"]}>
       <View style={styles.topBar}>
-        <View style={styles.identity}>
+        <Pressable
+          style={styles.identity}
+          onPress={openProfile}
+          hitSlop={6}
+          accessibilityRole="button"
+          accessibilityLabel="Open profile"
+        >
           <View style={styles.avatar}>
             <Ionicons name="sparkles-outline" size={18} color={colors.accent} />
           </View>
           <View>
             <Text style={styles.appName}>Aidha</Text>
           </View>
-        </View>
+        </Pressable>
         <View style={styles.topBarActions}>
           <Pressable onPress={goToCalendar} hitSlop={10}>
             <Ionicons name="calendar-outline" size={22} color={colors.textSecondary} />
           </Pressable>
-          <Pressable onPress={handleSettingsPress} hitSlop={10}>
+          <Pressable onPress={openProfile} hitSlop={10} accessibilityRole="button" accessibilityLabel="Profile and settings">
             <Ionicons name="settings-outline" size={22} color={colors.textSecondary} />
           </Pressable>
         </View>
@@ -376,10 +404,13 @@ export default function TodayScreen({ navigation }: Props) {
           {error && <Text style={styles.error}>{error}</Text>}
 
           {!hasAnything ? (
-            <View style={styles.emptyState}>
-              <Ionicons name="sparkles-outline" size={22} color={colors.textMuted} />
-              <Text style={styles.emptyText}>Nothing on deck today. Nice.</Text>
-            </View>
+            <>
+              <View style={styles.emptyState}>
+                <Ionicons name="sparkles-outline" size={22} color={colors.textMuted} />
+                <Text style={styles.emptyText}>Nothing on deck today. Nice.</Text>
+              </View>
+              {habitsSection}
+            </>
           ) : (
             <>
               {groups.hero && (
@@ -444,6 +475,8 @@ export default function TodayScreen({ navigation }: Props) {
                   ))}
                 </Section>
               )}
+
+              {habitsSection}
 
               {groups.flexibleList.length > 0 && (
                 <View style={styles.section}>

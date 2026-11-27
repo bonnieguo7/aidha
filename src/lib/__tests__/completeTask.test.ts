@@ -39,6 +39,7 @@ function makeTask(overrides: Partial<TaskRow> = {}): TaskRow {
     duration_minutes: null,
     notes: null,
     is_completed: false,
+    completed_at: null,
     latitude: null,
     longitude: null,
     resolved_address: null,
@@ -96,7 +97,7 @@ describe("completeTask", () => {
 
     const result = await completeTask(makeTask());
 
-    expect(result).toEqual({ next: null, error: null });
+    expect(result).toEqual({ next: null, error: null, completed: false });
     expect(mockInsert).not.toHaveBeenCalled();
   });
 
@@ -105,7 +106,7 @@ describe("completeTask", () => {
 
     const result = await completeTask(makeTask({ recurring_frequency: null, recurring_detail: null }));
 
-    expect(result).toEqual({ next: null, error: null });
+    expect(result).toEqual({ next: null, error: null, completed: true });
     expect(mockInsert).not.toHaveBeenCalled();
   });
 
@@ -114,7 +115,7 @@ describe("completeTask", () => {
 
     const result = await completeTask(makeTask());
 
-    expect(result).toEqual({ next: null, error: "boom" });
+    expect(result).toEqual({ next: null, error: "boom", completed: false });
     expect(mockInsert).not.toHaveBeenCalled();
   });
 
@@ -125,6 +126,6 @@ describe("completeTask", () => {
 
     const result = await completeTask(makeTask());
 
-    expect(result).toEqual({ next: null, error: null });
+    expect(result).toEqual({ next: null, error: null, completed: true });
   });
 });

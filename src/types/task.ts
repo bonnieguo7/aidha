@@ -91,6 +91,9 @@ export interface TaskRow {
   // Free-form notes - a packing list, a door code, anything. Null when empty.
   notes: string | null;
   is_completed: boolean;
+  // When the user ticked it off; null if not completed, completed before this was
+  // tracked, or archived automatically (a past event).
+  completed_at: string | null;
   latitude: number | null;
   longitude: number | null;
   resolved_address: string | null;

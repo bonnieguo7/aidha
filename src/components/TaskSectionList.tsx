@@ -14,6 +14,7 @@ import {
 } from "react-native";
 import CalendarMonthView, { dateKey } from "./CalendarMonthView";
 import { archivePastEvents } from "../lib/autoArchivePastEvents";
+import { useAccomplishments } from "../lib/AccomplishmentsContext";
 import { completeTask } from "../lib/completeTask";
 import { ensureRecurringReminders } from "../lib/ensureRecurringReminders";
 import { confirmDelete } from "../lib/confirmDelete";
@@ -114,6 +115,7 @@ export default function TaskSectionList({
   initialViewMode,
   initialEventView,
 }: Props) {
+  const { recordCompletion, recordUncompletion } = useAccomplishments();
   const [viewMode, setViewMode] = useState<TaskType>(initialViewMode ?? "task");
   const [eventView, setEventView] = useState<EventView>(initialEventView ?? "list");
 
@@ -238,24 +240,29 @@ export default function TaskSectionList({
   async function handleToggleComplete(item: TaskRow) {
     // Restoring from the Archive tab: nothing to cancel or generate.
     if (completed) {
-      const { error: updateError } = await supabase.from("tasks").update({ is_completed: false }).eq("id", item.id);
+      const { error: updateError } = await supabase
+        .from("tasks")
+        .update({ is_completed: false, completed_at: null })
+        .eq("id", item.id);
       if (updateError) {
         setError(updateError.message);
         return;
       }
       configureRemovalAnimation();
       removeTask(item.id);
+      recordUncompletion(item);
       return;
     }
 
     // Completing also cancels the task's reminders (a completed task shouldn't
     // still ring a "time to leave" alert) and, for a repeating task, creates
     // its next occurrence.
-    const { next, error: completeError } = await completeTask(item);
+    const { next, error: completeError, completed: didComplete } = await completeTask(item);
     if (completeError) {
       setError(completeError);
       return;
     }
+    if (didComplete) recordCompletion(item);
     configureRemovalAnimation();
     removeTask(item.id);
     if (next) {
@@ -308,6 +315,7 @@ export default function TaskSectionList({
         >
           <Text style={[styles.tabText, viewMode === "event" && styles.tabTextActive]}>Events</Text>
         </Pressable>
+
       </View>
 
       {viewMode === "event" && (

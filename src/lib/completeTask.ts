@@ -68,6 +68,9 @@ export async function createNextOccurrence(task: TaskRow): Promise<TaskRow | nul
 export interface CompleteTaskResult {
   next: TaskRow | null;
   error: string | null;
+  // Whether this call is the one that completed it - false if another screen (or
+  // a second tap) got there first, so it isn't counted or celebrated twice.
+  completed: boolean;
 }
 
 // Marks a task complete, cancels its reminders, and - if it repeats - creates
@@ -81,13 +84,18 @@ export async function completeTask(task: TaskRow): Promise<CompleteTaskResult> {
 
   const { data, error } = await supabase
     .from("tasks")
-    .update({ is_completed: true, leaving_notification_id: null, datetime_notification_id: null })
+    .update({
+      is_completed: true,
+      completed_at: new Date().toISOString(),
+      leaving_notification_id: null,
+      datetime_notification_id: null,
+    })
     .eq("id", task.id)
     .eq("is_completed", false)
     .select("id");
 
-  if (error) return { next: null, error: error.message };
-  if (!data || data.length === 0) return { next: null, error: null };
+  if (error) return { next: null, error: error.message, completed: false };
+  if (!data || data.length === 0) return { next: null, error: null, completed: false };
 
-  return { next: await createNextOccurrence(task), error: null };
+  return { next: await createNextOccurrence(task), error: null, completed: true };
 }
