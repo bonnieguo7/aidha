@@ -2,6 +2,14 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.111.0";
 import { SignJWT, importPKCS8 } from "https://esm.sh/jose@5.9.6";
 import { corsHeaders } from "../_shared/cors.ts";
 import { liveActivityWindow } from "../_shared/liveActivityWindow.ts";
+import {
+  isDeadToken,
+  pushTargetsByUser,
+  type ApnsEnvironment,
+  type LegacyTokenRow,
+  type PushTarget,
+  type TokenRow,
+} from "../_shared/pushTargets.ts";
 
 // Unlike every other function in this project, this one is never called by
 // the client - it's hit once a minute by a pg_cron job (see the
@@ -15,10 +23,11 @@ const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 const APNS_KEY_ID = Deno.env.get("APNS_KEY_ID");
 const APNS_TEAM_ID = Deno.env.get("APNS_TEAM_ID");
 const APNS_PRIVATE_KEY = Deno.env.get("APNS_PRIVATE_KEY"); // PEM contents of the .p8 auth key
+// The app and APNs environment for tokens from the older device_push_tokens
+// table, which doesn't record which app they came from. Tokens in
+// live_activity_tokens carry their own.
 const APNS_BUNDLE_ID = Deno.env.get("APNS_BUNDLE_ID");
-// "sandbox" for a development-signed dev-client build, "production" once
-// shipped via TestFlight/App Store - see the plan's Risks section.
-const APNS_ENVIRONMENT = Deno.env.get("APNS_ENVIRONMENT") ?? "sandbox";
+const APNS_ENVIRONMENT: ApnsEnvironment = Deno.env.get("APNS_ENVIRONMENT") === "production" ? "production" : "sandbox";
 
 
 function jsonResponse(body: unknown, status: number) {
@@ -60,9 +69,9 @@ async function buildApnsJwt(): Promise<string> {
 // as a STRING, not nested as an object. "attributes-type" must be the Swift
 // type name "LiveActivityAttributes" itself, not the widget's name - Apple's
 // push-to-start payload names the ActivityAttributes struct there.
-async function sendPushToStart(token: string, jwt: string, task: EligibleTask): Promise<Response> {
+async function sendPushToStart(target: PushTarget, jwt: string, task: EligibleTask): Promise<Response> {
   const host =
-    APNS_ENVIRONMENT === "production" ? "https://api.push.apple.com" : "https://api.sandbox.push.apple.com";
+    target.environment === "production" ? "https://api.push.apple.com" : "https://api.sandbox.push.apple.com";
 
   const props = JSON.stringify({
     taskTitle: task.title,
@@ -82,12 +91,12 @@ async function sendPushToStart(token: string, jwt: string, task: EligibleTask): 
     },
   };
 
-  return fetch(`${host}/3/device/${token}`, {
+  return fetch(`${host}/3/device/${target.token}`, {
     method: "POST",
     headers: {
       authorization: `bearer ${jwt}`,
       "apns-push-type": "liveactivity",
-      "apns-topic": `${APNS_BUNDLE_ID}.push-type.liveactivity`,
+      "apns-topic": `${target.bundleId}.push-type.liveactivity`,
       "apns-priority": "10",
     },
     body: JSON.stringify(body),
@@ -127,15 +136,25 @@ Deno.serve(async (req) => {
   if (!tasks || tasks.length === 0) return jsonResponse({ started: 0 }, 200);
 
   const userIds = [...new Set(tasks.map((t) => t.user_id))];
-  const { data: tokenRows, error: tokenError } = await supabase
-    .from("device_push_tokens")
-    .select("user_id, push_to_start_token")
-    .in("user_id", userIds);
+  const [perApp, legacy] = await Promise.all([
+    supabase
+      .from("live_activity_tokens")
+      .select("id, user_id, push_to_start_token, bundle_id, apns_environment, updated_at")
+      .in("user_id", userIds),
+    supabase.from("device_push_tokens").select("id, user_id, push_to_start_token").in("user_id", userIds),
+  ]);
+  if (perApp.error) return jsonResponse({ error: `Token query failed: ${perApp.error.message}` }, 500);
+  if (legacy.error) return jsonResponse({ error: `Token query failed: ${legacy.error.message}` }, 500);
 
-  if (tokenError) return jsonResponse({ error: `Token query failed: ${tokenError.message}` }, 500);
-
-  const tokenByUser = new Map((tokenRows ?? []).map((r) => [r.user_id, r.push_to_start_token as string]));
+  const targetsByUser = pushTargetsByUser(
+    (perApp.data ?? []) as TokenRow[],
+    (legacy.data ?? []) as LegacyTokenRow[],
+    { bundleId: APNS_BUNDLE_ID!, environment: APNS_ENVIRONMENT }
+  );
   const jwt = await buildApnsJwt();
+  // Tokens found dead this run, so a second task for the same user doesn't
+  // try them again.
+  const deadTokens = new Set<string>();
 
   let started = 0;
   // Collected (not just console.error'd) so failures are visible in the
@@ -143,25 +162,34 @@ Deno.serve(async (req) => {
   // logs` command on this CLI version.
   const failures: unknown[] = [];
   for (const task of tasks as EligibleTask[]) {
-    const token = tokenByUser.get(task.user_id);
-    if (!token) continue; // No registered device for this user - nothing to push to.
-
-    try {
-      const res = await sendPushToStart(token, jwt, task);
-      if (!res.ok) {
+    const targets = (targetsByUser.get(task.user_id) ?? []).filter((t) => !deadTokens.has(t.token));
+    // One Live Activity per task: the most recently opened app first, moving
+    // on to the next only if APNs says that app's token is dead.
+    for (const target of targets) {
+      try {
+        const res = await sendPushToStart(target, jwt, task);
+        if (res.ok) {
+          // Marked per-task, right after its own successful push - so a
+          // mid-loop failure doesn't lose progress on tasks that already
+          // succeeded, and a failed one stays eligible for next minute's tick.
+          await supabase
+            .from("tasks")
+            .update({ live_activity_started_at: new Date().toISOString() })
+            .eq("id", task.id);
+          started++;
+          break;
+        }
         const body = await res.text();
-        console.error(`APNs push-to-start failed for task ${task.id}: ${res.status} ${body}`);
-        failures.push({ taskId: task.id, status: res.status, body });
-        continue;
+        console.error(`APNs push-to-start failed for task ${task.id} (${target.bundleId}): ${res.status} ${body}`);
+        failures.push({ taskId: task.id, bundleId: target.bundleId, status: res.status, body });
+        if (!isDeadToken(res.status, body)) break; // Might work next minute - keep the token.
+        deadTokens.add(target.token);
+        await supabase.from(target.table).delete().eq("id", target.id);
+      } catch (err) {
+        console.error(`APNs request failed for task ${task.id}: ${String(err)}`);
+        failures.push({ taskId: task.id, error: String(err) });
+        break;
       }
-      // Marked per-task, right after its own successful push - so a
-      // mid-loop APNs failure doesn't lose progress on tasks that already
-      // succeeded, and a failed one just stays eligible for next minute's tick.
-      await supabase.from("tasks").update({ live_activity_started_at: new Date().toISOString() }).eq("id", task.id);
-      started++;
-    } catch (err) {
-      console.error(`APNs request failed for task ${task.id}: ${String(err)}`);
-      failures.push({ taskId: task.id, error: String(err) });
     }
   }
 

@@ -46,10 +46,14 @@ export async function archiveHabit(id: string): Promise<string | null> {
   return error?.message ?? null;
 }
 
-export async function addCheckin(habitId: string): Promise<{ data: HabitCheckin | null; error: string | null }> {
+// `at` defaults to now; a past moment checks the habit off for an earlier day.
+export async function addCheckin(
+  habitId: string,
+  at: Date = new Date()
+): Promise<{ data: HabitCheckin | null; error: string | null }> {
   const { data, error } = await supabase
     .from("habit_checkins")
-    .insert({ habit_id: habitId, completed_at: new Date().toISOString() })
+    .insert({ habit_id: habitId, completed_at: at.toISOString() })
     .select("id, habit_id, completed_at")
     .single();
   return { data: (data as HabitCheckin | null) ?? null, error: error?.message ?? null };

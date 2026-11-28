@@ -3,10 +3,19 @@ import { useFocusEffect } from "@react-navigation/native";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import HabitCalendar from "../components/HabitCalendar";
 import HabitFields from "../components/HabitFields";
 import { useAccomplishments } from "../lib/AccomplishmentsContext";
 import { refreshHabitReminders } from "../lib/habitReminders";
-import { cadenceLabel, latestCheckinThisPeriod, periodPhrase, progressLabel, streakLabel } from "../lib/habits";
+import {
+  cadenceLabel,
+  checkinTimeFor,
+  dayKey,
+  latestCheckinThisPeriod,
+  periodPhrase,
+  progressLabel,
+  streakLabel,
+} from "../lib/habits";
 import { addCheckin, archiveHabit, fetchHabitCheckins, removeCheckin, updateHabit } from "../lib/habitsApi";
 import { statusesFor } from "../lib/useHabits";
 import { colors } from "../lib/theme";
@@ -15,28 +24,24 @@ import type { HabitCheckin, HabitDraft, HabitRow } from "../types/habit";
 
 type Props = NativeStackScreenProps<TasksStackParamList, "HabitDetail">;
 
-const RECENT_COUNT = 10;
 
 function lookbackStart(): Date {
   const now = new Date();
   return new Date(now.getFullYear() - 1, now.getMonth(), 1);
 }
 
-function formatCheckin(iso: string): string {
-  const date = new Date(iso);
-  const day = date.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
-  const time = date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
-  return `${day} · ${time}`;
-}
 
-// One habit: how it's going this period, its streak, a check-in button, its
-// settings, and its recent check-ins (each removable, to undo a mis-tap).
+// One habit: how it's going this period, its streak, a check-in button, a
+// calendar of its history (where earlier days can be checked off or undone),
+// and its settings.
 export default function HabitDetailScreen({ route, navigation }: Props) {
-  const { recordCheckin, recordCheckinRemoved } = useAccomplishments();
+  const { recordCheckin, recordCheckinRemoved, refresh: refreshAccomplishments } = useAccomplishments();
   const [habit, setHabit] = useState<HabitRow>(route.params.habit);
   const [checkins, setCheckins] = useState<HabitCheckin[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isCheckingIn, setIsCheckingIn] = useState(false);
+  // dayKey of a calendar day whose change is being saved.
+  const [busyDay, setBusyDay] = useState<string | null>(null);
   const loadId = useRef(0);
 
   useLayoutEffect(() => {
@@ -65,7 +70,6 @@ export default function HabitDetailScreen({ route, navigation }: Props) {
     () => (checkins ? statusesFor([habit], checkins, new Date())[0] : null),
     [habit, checkins]
   );
-  const recent = useMemo(() => (checkins ?? []).slice(-RECENT_COUNT).reverse(), [checkins]);
 
   async function handleCheckIn() {
     if (!checkins || isCheckingIn) return;
@@ -105,15 +109,55 @@ export default function HabitDetailScreen({ route, navigation }: Props) {
     setIsCheckingIn(false);
   }
 
-  function handleRemoveCheckin(checkin: HabitCheckin) {
-    Alert.alert("Remove this check-in?", formatCheckin(checkin.completed_at), [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Remove",
-        style: "destructive",
-        onPress: () => removeAndUpdate(checkin),
-      },
-    ]);
+  // Checks the habit off for a day from the calendar - today or earlier.
+  async function checkInOn(day: Date) {
+    if (!checkins) return;
+    const now = new Date();
+    if (dayKey(day) === dayKey(now)) {
+      await handleCheckIn();
+      return;
+    }
+    setBusyDay(dayKey(day));
+    const { data, error: insertError } = await addCheckin(habit.id, checkinTimeFor(day, now));
+    setBusyDay(null);
+    if (insertError || !data) {
+      Alert.alert("Couldn't check it off", insertError ?? "Please try again.");
+      return;
+    }
+    loadId.current += 1;
+    setCheckins((prev) => [...(prev ?? []), data]);
+    // Not today's count, so no "done today" toast - just bring the Profile
+    // numbers and reminders up to date.
+    refreshAccomplishments();
+    refreshHabitReminders();
+  }
+
+  function handleDayPress(day: Date, dayCheckins: HabitCheckin[]) {
+    if (dayCheckins.length === 0) {
+      checkInOn(day);
+      return;
+    }
+    const label = day.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
+    // The latest one that day is what gets taken back.
+    const latest = [...dayCheckins].sort((a, b) => (a.completed_at < b.completed_at ? 1 : -1))[0];
+    const canAddAnother = habit.cadence === "daily" && dayCheckins.length < habit.target_count;
+    Alert.alert(
+      label,
+      dayCheckins.length === 1 ? "Checked off this day." : `Checked off ${dayCheckins.length} times this day.`,
+      [
+        ...(canAddAnother ? [{ text: "Check in again", onPress: () => checkInOn(day) }] : []),
+        {
+          text: dayCheckins.length === 1 ? "Uncheck" : "Remove one",
+          style: "destructive" as const,
+          onPress: async () => {
+            setBusyDay(dayKey(day));
+            await removeAndUpdate(latest);
+            setBusyDay(null);
+          },
+        },
+        { text: "Cancel", style: "cancel" as const },
+      ]
+    );
   }
 
   async function handleChange(updated: HabitDraft): Promise<string | null> {
@@ -208,30 +252,22 @@ export default function HabitDetailScreen({ route, navigation }: Props) {
         )}
       </View>
 
+      {checkins && (
+        <>
+          <Text style={styles.sectionTitle}>History</Text>
+          <HabitCalendar
+            checkins={checkins}
+            cadence={habit.cadence}
+            target={habit.target_count}
+            earliest={lookbackStart()}
+            busyDay={busyDay}
+            onDayPress={handleDayPress}
+          />
+        </>
+      )}
+
       <Text style={styles.sectionTitle}>Settings</Text>
       <HabitFields habit={habit} onChange={handleChange} />
-
-      <Text style={styles.sectionTitle}>Recent check-ins</Text>
-      {checkins && recent.length === 0 ? (
-        <Text style={styles.empty}>None yet.</Text>
-      ) : (
-        <View style={styles.list}>
-          {recent.map((checkin, i) => (
-            <View key={checkin.id} style={[styles.checkinRow, i > 0 && styles.checkinRowBorder]}>
-              <Ionicons name="checkmark-circle" size={18} color={colors.success} />
-              <Text style={styles.checkinText}>{formatCheckin(checkin.completed_at)}</Text>
-              <Pressable
-                onPress={() => handleRemoveCheckin(checkin)}
-                hitSlop={10}
-                accessibilityRole="button"
-                accessibilityLabel={`Remove check-in from ${formatCheckin(checkin.completed_at)}`}
-              >
-                <Ionicons name="close" size={18} color={colors.textMuted} />
-              </Pressable>
-            </View>
-          ))}
-        </View>
-      )}
 
       <Pressable onPress={handleDelete} style={styles.deleteButton} accessibilityRole="button">
         <Ionicons name="trash-outline" size={16} color={colors.danger} />
@@ -332,32 +368,6 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     marginTop: 24,
     marginBottom: 10,
-  },
-  empty: {
-    fontSize: 14,
-    color: colors.textMuted,
-  },
-  list: {
-    backgroundColor: colors.surface,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: colors.border,
-    paddingHorizontal: 14,
-  },
-  checkinRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    paddingVertical: 12,
-  },
-  checkinRowBorder: {
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: colors.border,
-  },
-  checkinText: {
-    flex: 1,
-    fontSize: 15,
-    color: colors.textPrimary,
   },
   deleteButton: {
     flexDirection: "row",

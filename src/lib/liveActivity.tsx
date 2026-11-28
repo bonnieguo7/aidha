@@ -9,7 +9,9 @@ import {
   progressViewStyle,
   tint,
 } from "@expo/ui/swift-ui/modifiers";
+import Constants from "expo-constants";
 import { addPushToStartTokenListener, createLiveActivity, type LiveActivityEnvironment } from "expo-widgets";
+import { pushTargetForBundle } from "./pushTarget";
 import { supabase } from "./supabase";
 
 // Kept minimal and serializable - this crosses into native
@@ -135,7 +137,7 @@ export const DepartureLiveActivity = (() => {
   }
 })();
 
-// Registers this device for remote push-to-start and upserts the token to
+// Registers this app for remote push-to-start and upserts its token to
 // Supabase - the server (start-live-activities edge function, run on a
 // cron) uses it to start a Live Activity even if the app isn't open, once a
 // task's leaving_by is 15 minutes out. Call once per signed-in session (see
@@ -155,9 +157,20 @@ export function registerPushToStartListener(): () => void {
       const { data: userData } = await supabase.auth.getUser();
       if (!userData.user) return;
 
-      const { error } = await supabase.from("device_push_tokens").upsert(
-        { user_id: userData.user.id, push_to_start_token: token, platform: "ios" },
-        { onConflict: "user_id,platform" }
+      const bundleId = Constants.expoConfig?.ios?.bundleIdentifier;
+      if (!bundleId) return;
+
+      // One row per app (dev build and TestFlight build each keep their own),
+      // stamped with when it was last seen - the server pushes to the app
+      // opened most recently.
+      const { error } = await supabase.from("live_activity_tokens").upsert(
+        {
+          user_id: userData.user.id,
+          push_to_start_token: token,
+          ...pushTargetForBundle(bundleId),
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "user_id,bundle_id" }
       );
       if (error) console.error("liveActivity: failed to persist push-to-start token", error);
     });

@@ -91,6 +91,50 @@ export function latestCheckinThisPeriod(
   return latest;
 }
 
+// --- Checking off earlier days ----------------------------------------------
+
+// "2026-11-24" for the local day a moment falls on.
+export function dayKey(date: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+// Each day's check-ins, keyed by dayKey.
+export function checkinsByDay(checkins: HabitCheckin[]): Map<string, HabitCheckin[]> {
+  const byDay = new Map<string, HabitCheckin[]>();
+  for (const c of checkins) {
+    const key = dayKey(new Date(c.completed_at));
+    const list = byDay.get(key) ?? [];
+    list.push(c);
+    byDay.set(key, list);
+  }
+  return byDay;
+}
+
+// When a check-in for `day` is recorded: right now for today, midday for an
+// earlier day (clear of midnight, so it can't slip into a neighbouring day).
+export function checkinTimeFor(day: Date, now: Date): Date {
+  if (dayKey(day) === dayKey(now)) return now;
+  return new Date(day.getFullYear(), day.getMonth(), day.getDate(), 12, 0, 0);
+}
+
+// The days to show for a month, in Monday-first weeks: null for the blanks
+// before the 1st and after the last day.
+export function monthGrid(monthStart: Date): (Date | null)[][] {
+  const year = monthStart.getFullYear();
+  const month = monthStart.getMonth();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const leading = (new Date(year, month, 1).getDay() + 6) % 7;
+  const cells: (Date | null)[] = [
+    ...Array.from({ length: leading }, () => null),
+    ...Array.from({ length: daysInMonth }, (_, i) => new Date(year, month, i + 1)),
+  ];
+  while (cells.length % 7 !== 0) cells.push(null);
+  const weeks: (Date | null)[][] = [];
+  for (let i = 0; i < cells.length; i += 7) weeks.push(cells.slice(i, i + 7));
+  return weeks;
+}
+
 const UNIT: Record<HabitCadence, [string, string]> = {
   daily: ["day", "days"],
   weekly: ["week", "weeks"],

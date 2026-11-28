@@ -1,5 +1,9 @@
 import {
   cadenceLabel,
+  checkinTimeFor,
+  checkinsByDay,
+  dayKey,
+  monthGrid,
   finalizeHabit,
   habitProgress,
   latestCheckinThisPeriod,
@@ -160,5 +164,41 @@ describe("latestCheckinThisPeriod", () => {
   it("never reaches back into an earlier period", () => {
     expect(latestCheckinThisPeriod("daily", [c("yesterday", "2026-11-25T21:00:00")], NOW)).toBeNull();
     expect(latestCheckinThisPeriod("weekly", [c("last week", "2026-11-22T21:00:00")], NOW)).toBeNull();
+  });
+});
+
+describe("checking off earlier days", () => {
+  it("groups check-ins by local day", () => {
+    const byDay = checkinsByDay([
+      { id: "a", habit_id: "h", completed_at: iso("2026-11-24T08:00:00") },
+      { id: "b", habit_id: "h", completed_at: iso("2026-11-24T21:00:00") },
+      { id: "c", habit_id: "h", completed_at: iso("2026-11-25T00:30:00") },
+    ]);
+    expect(byDay.get("2026-11-24")!.map((c) => c.id)).toEqual(["a", "b"]);
+    expect(byDay.get("2026-11-25")!.map((c) => c.id)).toEqual(["c"]);
+  });
+
+  it("records today's check-in now, and an earlier day's at midday", () => {
+    expect(checkinTimeFor(at("2026-11-26T00:00:00"), NOW)).toBe(NOW);
+    expect(checkinTimeFor(at("2026-11-23T00:00:00"), NOW)).toEqual(at("2026-11-23T12:00:00"));
+    expect(dayKey(checkinTimeFor(at("2026-11-23T00:00:00"), NOW))).toBe("2026-11-23");
+  });
+
+  it("counts a back-filled day toward the streak", () => {
+    const checkins = [iso("2026-11-26T08:00:00"), iso("2026-11-24T21:00:00")];
+    expect(habitProgress(daily, checkins, NOW).streak).toBe(1);
+    const filled = [...checkins, checkinTimeFor(at("2026-11-25T00:00:00"), NOW).toISOString()];
+    expect(habitProgress(daily, filled, NOW).streak).toBe(3);
+  });
+
+  it("lays a month out in Monday-first weeks", () => {
+    // November 2026 starts on a Sunday and has 30 days.
+    const weeks = monthGrid(at("2026-11-01T00:00:00"));
+    expect(weeks).toHaveLength(6);
+    expect(weeks[0].slice(0, 6)).toEqual([null, null, null, null, null, null]);
+    expect(weeks[0][6]).toEqual(at("2026-11-01T00:00:00"));
+    expect(weeks[5][0]).toEqual(at("2026-11-30T00:00:00"));
+    expect(weeks[5].slice(1)).toEqual([null, null, null, null, null, null]);
+    expect(weeks.every((w) => w.length === 7)).toBe(true);
   });
 });
